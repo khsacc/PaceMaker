@@ -1,0 +1,401 @@
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QComboBox, QGroupBox, QTabWidget, QFormLayout,
+    QListWidget, QStackedWidget, QDoubleSpinBox, QSpinBox, QRadioButton, QButtonGroup, QCheckBox,
+)
+from PyQt6.QtCore import Qt
+import pyqtgraph as pg
+
+try:
+    from settings.i18n import tr
+except ImportError:
+    import os as _os
+    import sys as _sys
+    _pkg = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    if _pkg not in _sys.path:
+        _sys.path.insert(0, _pkg)
+    from settings.i18n import tr
+
+pg.setConfigOption('background', 'w')
+pg.setConfigOption('foreground', 'k')
+
+
+class PaceUI(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle(tr("Druck PACE5000 Controller"))
+        self.resize(920, 800)
+        main_layout = QVBoxLayout(self)
+
+        # Connection group (may be hidden when backend is managed externally)
+        self.conn_group = QGroupBox(tr("Connection"))
+        conn_layout = QHBoxLayout()
+
+        self.conn_type_combo = QComboBox()
+        self.conn_type_combo.addItems([tr("TCP (Ethernet)"), tr("Serial (RS232C)")])
+        self.conn_type_combo.setMaximumWidth(160)
+
+        self.ip_input = QLineEdit("192.168.1.100")
+        self.ip_input.setMaximumWidth(140)
+        self.ip_label = QLabel(tr("IP Address:"))
+        self.port_input = QLineEdit("5025")
+        self.port_input.setMaximumWidth(65)
+        self.port_label = QLabel(tr("Port:"))
+
+        self.com_port_input = QLineEdit("COM1")
+        self.com_port_input.setMaximumWidth(70)
+        self.com_port_label = QLabel(tr("COM Port:"))
+        self.baudrate_input = QLineEdit("9600")
+        self.baudrate_input.setMaximumWidth(70)
+        self.baudrate_label = QLabel(tr("Baud:"))
+
+        self.btn_connect = QPushButton(tr("Connect"))
+        self.btn_disconnect = QPushButton(tr("Disconnect"))
+        self.btn_disconnect.setEnabled(False)
+        self.status_label = QLabel(tr("Status: Disconnected"))
+        self.status_label.setStyleSheet("color: gray; font-weight: bold;")
+
+        conn_layout.addWidget(self.conn_type_combo)
+        conn_layout.addSpacing(8)
+        conn_layout.addWidget(self.ip_label)
+        conn_layout.addWidget(self.ip_input)
+        conn_layout.addWidget(self.port_label)
+        conn_layout.addWidget(self.port_input)
+        conn_layout.addWidget(self.com_port_label)
+        conn_layout.addWidget(self.com_port_input)
+        conn_layout.addWidget(self.baudrate_label)
+        conn_layout.addWidget(self.baudrate_input)
+        conn_layout.addWidget(self.btn_connect)
+        conn_layout.addWidget(self.btn_disconnect)
+        conn_layout.addSpacing(16)
+        conn_layout.addWidget(self.status_label)
+        conn_layout.addStretch()
+        self.conn_group.setLayout(conn_layout)
+        main_layout.addWidget(self.conn_group)
+
+        # Show TCP fields by default, hide serial fields
+        self._set_conn_fields_visible(tcp=True)
+        self.conn_type_combo.currentIndexChanged.connect(self._on_conn_type_changed)
+
+        self.tabs = QTabWidget()
+        self.tab_main = QWidget()
+        self.tab_schedule = QWidget()
+        self.tabs.addTab(self.tab_main, tr("Manual Control"))
+        self.tabs.addTab(self.tab_schedule, tr("Scheduled Control"))
+        main_layout.addWidget(self.tabs)
+        self.setup_main_tab()
+        self.setup_schedule_tab()
+
+    def _set_conn_fields_visible(self, tcp: bool):
+        self.ip_label.setVisible(tcp)
+        self.ip_input.setVisible(tcp)
+        self.port_label.setVisible(tcp)
+        self.port_input.setVisible(tcp)
+        self.com_port_label.setVisible(not tcp)
+        self.com_port_input.setVisible(not tcp)
+        self.baudrate_label.setVisible(not tcp)
+        self.baudrate_input.setVisible(not tcp)
+
+    def _on_conn_type_changed(self, index: int):
+        self._set_conn_fields_visible(tcp=(index == 0))
+
+    def get_pressure_unit(self) -> str:
+        return "MPa" if self.radio_unit_mpa.isChecked() else "Bar"
+
+    def set_pressure_unit_enabled(self, enabled: bool):
+        self.radio_unit_mpa.setEnabled(enabled)
+        self.radio_unit_bar.setEnabled(enabled)
+
+    def setup_main_tab(self):
+        layout = QVBoxLayout(self.tab_main)
+
+        plot_group = QGroupBox(tr("Live Pressure"))
+        plot_layout = QVBoxLayout()
+        self.live_pressure_label = QLabel(tr("Current Pressure:  ---  {unit}", unit="MPa"))
+        self.live_pressure_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.live_pressure_label.setStyleSheet("font-size: 22px; color: black;")
+        plot_layout.addWidget(self.live_pressure_label)
+        self.source_pressure_label = QLabel(tr("−ve source:  ---    +ve source:  ---"))
+        self.source_pressure_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.source_pressure_label.setStyleSheet("font-size: 10pt; color: #555;")
+        plot_layout.addWidget(self.source_pressure_label)
+        self.plot_widget = pg.PlotWidget(title=tr("Pressure vs Time"))
+        self.plot_widget.setLabel("left", tr("Pressure ({unit})", unit="MPa"))
+        self.plot_widget.setLabel("bottom", tr("Time"), units="s")
+        self.plot_widget.getPlotItem().getAxis('left').enableAutoSIPrefix(False)
+        self.plot_widget.getPlotItem().getAxis('bottom').enableAutoSIPrefix(False)
+        self.plot_widget.showGrid(x=True, y=True)
+        self.plot_curve = self.plot_widget.plot(pen=pg.mkPen("#1a6fc4", width=2))
+        self.plot_widget.plotItem.vb.setMouseMode(pg.ViewBox.RectMode)
+        self.plot_widget.plotItem.vb.setLimits(xMin=0)
+        plot_btn_row = QHBoxLayout()
+        self.btn_clear_graph = QPushButton(tr("Clear Graph"))
+        self.plot_time_window_spinbox = QSpinBox()
+        self.plot_time_window_spinbox.setRange(10, 3600)
+        self.plot_time_window_spinbox.setValue(300)
+        self.plot_time_window_spinbox.setMaximumWidth(135)
+        self.plot_time_window_spinbox.setToolTip(tr("Display window: show only the latest N seconds"))
+        plot_btn_row.addStretch()
+        plot_btn_row.addWidget(QLabel(tr("Window:")))
+        plot_btn_row.addWidget(self.plot_time_window_spinbox)
+        plot_btn_row.addWidget(QLabel(tr("sec")))
+        plot_btn_row.addSpacing(16)
+        plot_btn_row.addWidget(self.btn_clear_graph)
+        plot_layout.addWidget(self.plot_widget)
+        plot_layout.addLayout(plot_btn_row)
+        plot_group.setLayout(plot_layout)
+        layout.addWidget(plot_group)
+
+        ctrl_group = QGroupBox(tr("Control Parameters [Press Enter to apply changes]"))
+        ctrl_layout = QFormLayout()
+        self.radio_measure = QRadioButton(tr("Measure"))
+        self.radio_control = QRadioButton(tr("Control"))
+        self.radio_measure.setChecked(True)
+        self._mode_button_group = QButtonGroup()
+        self._mode_button_group.addButton(self.radio_measure)
+        self._mode_button_group.addButton(self.radio_control)
+        self.radio_unit_mpa = QRadioButton("MPa")
+        self.radio_unit_bar = QRadioButton("Bar")
+        self.radio_unit_mpa.setChecked(True)
+        self._unit_button_group = QButtonGroup()
+        self._unit_button_group.addButton(self.radio_unit_mpa)
+        self._unit_button_group.addButton(self.radio_unit_bar)
+        self.target_input = QLineEdit()
+        self.target_input.setPlaceholderText(tr("Enter target pressure and press ENTER"))
+        self.target_input.setToolTip(tr("Press Enter to submit target pressure safely"))
+        rate_layout = QHBoxLayout()
+        self.rate_input = QLineEdit("0.02")
+        self.rate_input.setPlaceholderText(tr("Enter rate and press ENTER"))
+        self.rate_pressure_unit_display = QLineEdit("MPa")
+        self.rate_pressure_unit_display.setEnabled(False)
+        self.rate_pressure_unit_display.setMaximumWidth(45)
+        self.rate_time_combo = QComboBox()
+        self.rate_time_combo.addItems(["sec", "min"])
+        rate_layout.addWidget(self.rate_input)
+        rate_layout.addWidget(self.rate_pressure_unit_display)
+        rate_layout.addWidget(QLabel("/"))
+        rate_layout.addWidget(self.rate_time_combo)
+        self.chk_confirm_before_apply = QCheckBox(tr("Confirm before apply"))
+        self.chk_confirm_before_apply.setChecked(False)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(self.radio_measure)
+        mode_row.addWidget(self.radio_control)
+        mode_row.addStretch()
+        unit_row = QHBoxLayout()
+        unit_row.addWidget(self.radio_unit_mpa)
+        unit_row.addWidget(self.radio_unit_bar)
+        unit_row.addStretch()
+        ctrl_layout.addRow(tr("Mode:"), mode_row)
+        ctrl_layout.addRow(tr("Pressure Unit:"), unit_row)
+        ctrl_layout.addRow(tr("Target Pressure:"), self.target_input)
+        ctrl_layout.addRow(tr("Slew Rate:"), rate_layout)
+        ctrl_layout.addRow("", self.chk_confirm_before_apply)
+        ctrl_group.setLayout(ctrl_layout)
+
+        rel_group = QGroupBox(tr("Relative Pressure Change"))
+        rel_layout = QHBoxLayout()
+        self.btn_rel_minus = QPushButton("−")
+        self.btn_rel_minus.setMaximumWidth(53)
+        self.rel_step_spinbox = QLineEdit("0.1")
+        self.rel_step_spinbox.setPlaceholderText(tr("step"))
+        self.rel_step_spinbox.setMaximumWidth(48)
+        self.rel_step_spinbox.setMinimumHeight(32)
+        self.btn_rel_plus = QPushButton("+")
+        self.btn_rel_plus.setMaximumWidth(53)
+        rel_layout.addStretch()
+        rel_layout.addWidget(self.btn_rel_minus)
+        rel_layout.addWidget(self.rel_step_spinbox)
+        rel_layout.addWidget(self.btn_rel_plus)
+        rel_layout.addStretch()
+        rel_group.setLayout(rel_layout)
+
+        ctrl_rel_row = QHBoxLayout()
+        ctrl_rel_row.addWidget(ctrl_group, stretch=3)
+        ctrl_rel_row.addWidget(rel_group, stretch=1)
+        layout.addLayout(ctrl_rel_row)
+
+        log_group = QGroupBox(tr("Data Logging"))
+        log_layout = QHBoxLayout()
+        self.btn_log_start = QPushButton(tr("● Start Logging"))
+        self.btn_log_start.setStyleSheet(
+            "background-color: #4CAF50; color: white; font-weight: bold; padding: 6px 16px;"
+        )
+        self.btn_log_start.setEnabled(False)
+        self.btn_log_stop = QPushButton(tr("■ Stop / Save Log"))
+        self.btn_log_stop.setStyleSheet(
+            "background-color: #f44336; color: white; font-weight: bold; padding: 6px 16px;"
+        )
+        self.btn_log_stop.setEnabled(False)
+        self.interval_spinbox = QDoubleSpinBox()
+        self.interval_spinbox.setRange(0.1, 60.0)
+        self.interval_spinbox.setValue(1.0)
+        self.interval_spinbox.setSuffix(" s")
+        self.interval_spinbox.setDecimals(1)
+        self.interval_spinbox.setMaximumWidth(80)
+        self.log_status_label = QLabel(tr("Log: Stopped"))
+        self.log_status_label.setStyleSheet("color: gray; font-weight: bold;")
+        self.log_count_label = QLabel(tr("Records: {n}", n=0))
+        self.log_count_label.setStyleSheet("color: gray;")
+        log_layout.addWidget(self.btn_log_start)
+        log_layout.addWidget(self.btn_log_stop)
+        log_layout.addSpacing(16)
+        log_layout.addWidget(QLabel(tr("Interval:")))
+        log_layout.addWidget(self.interval_spinbox)
+        log_layout.addSpacing(16)
+        log_layout.addWidget(self.log_status_label)
+        log_layout.addWidget(self.log_count_label)
+        log_layout.addStretch()
+        log_group.setLayout(log_layout)
+        layout.addWidget(log_group)
+
+    def setup_schedule_tab(self):
+        layout = QVBoxLayout(self.tab_schedule)
+
+        add_group = QGroupBox(tr("Add / Edit Schedule Item"))
+        add_layout = QVBoxLayout()
+        type_row = QHBoxLayout()
+        type_row.addWidget(QLabel(tr("Item Type:")))
+        self.sched_item_type = QComboBox()
+        self.sched_item_type.addItems([tr("Wait"), tr("Change Pressure")])
+        type_row.addWidget(self.sched_item_type)
+        type_row.addStretch()
+        add_layout.addLayout(type_row)
+
+        self.sched_param_stack = QStackedWidget()
+
+        wait_page = QWidget()
+        wait_form = QFormLayout(wait_page)
+        self.sched_wait_duration = QLineEdit()
+        self.sched_wait_duration.setPlaceholderText(tr("seconds"))
+        self.sched_wait_duration.setMaximumWidth(120)
+        wait_form.addRow(tr("Duration (s):"), self.sched_wait_duration)
+
+        pressure_page = QWidget()
+        pressure_form = QFormLayout(pressure_page)
+        pressure_row = QHBoxLayout()
+        self.sched_pressure_input = QLineEdit()
+        self.sched_pressure_input.setPlaceholderText(tr("value"))
+        self.sched_pressure_input.setMaximumWidth(120)
+        self.sched_pressure_unit = QComboBox()
+        self.sched_pressure_unit.addItems(["MPa", "Bar"])
+        pressure_row.addWidget(self.sched_pressure_input)
+        pressure_row.addWidget(self.sched_pressure_unit)
+        pressure_row.addStretch()
+        pressure_form.addRow(tr("Pressure:"), pressure_row)
+        rate_row = QHBoxLayout()
+        self.sched_rate_input = QLineEdit()
+        self.sched_rate_input.setPlaceholderText(tr("value"))
+        self.sched_rate_input.setMaximumWidth(120)
+        self.sched_rate_unit = QComboBox()
+        self.sched_rate_unit.addItems(["MPa/min", "MPa/sec"])
+        rate_row.addWidget(self.sched_rate_input)
+        rate_row.addWidget(self.sched_rate_unit)
+        rate_row.addStretch()
+        pressure_form.addRow(tr("Rate:"), rate_row)
+        self.sched_param_stack.addWidget(wait_page)
+        self.sched_param_stack.addWidget(pressure_page)
+        add_layout.addWidget(self.sched_param_stack)
+
+        info_label = QLabel(
+            tr(
+                "ℹ A Change Pressure step monitors automatically until the target pressure is reached.\n"
+                " You do not need to include settling time in the following Wait step."
+            )
+        )
+        info_label.setStyleSheet(
+            "color: #336; font-size: 9pt; background: #eef4ff;"
+            "border: 1px solid #aac; border-radius: 4px; padding: 6px;"
+        )
+        info_label.setWordWrap(True)
+        add_layout.addWidget(info_label)
+
+        btn_row = QHBoxLayout()
+        self.btn_sched_cancel_edit = QPushButton(tr("✕ Cancel Edit"))
+        self.btn_sched_cancel_edit.setVisible(False)
+        self.btn_sched_add = QPushButton(tr("＋ Add to Schedule"))
+        btn_row.addStretch()
+        btn_row.addWidget(self.btn_sched_cancel_edit)
+        btn_row.addWidget(self.btn_sched_add)
+        add_layout.addLayout(btn_row)
+        add_group.setLayout(add_layout)
+        layout.addWidget(add_group)
+
+        table_group = QGroupBox(tr("Schedule"))
+        table_outer = QVBoxLayout()
+
+        file_btn_row = QHBoxLayout()
+        self.btn_sched_save = QPushButton(tr("Save Schedule..."))
+        self.btn_sched_load = QPushButton(tr("Load Schedule..."))
+        file_btn_row.addWidget(self.btn_sched_save)
+        file_btn_row.addWidget(self.btn_sched_load)
+        file_btn_row.addStretch()
+        table_outer.addLayout(file_btn_row)
+
+        table_layout = QHBoxLayout()
+        self.sched_list = QListWidget()
+        table_layout.addWidget(self.sched_list, stretch=1)
+        list_btn_col = QVBoxLayout()
+        self.btn_sched_up = QPushButton(tr("▲ Up"))
+        self.btn_sched_down = QPushButton(tr("▼ Down"))
+        self.btn_sched_edit = QPushButton(tr("✎ Edit"))
+        self.btn_sched_delete = QPushButton(tr("✕ Delete"))
+        list_btn_col.addWidget(self.btn_sched_up)
+        list_btn_col.addWidget(self.btn_sched_down)
+        list_btn_col.addSpacing(8)
+        list_btn_col.addWidget(self.btn_sched_edit)
+        list_btn_col.addWidget(self.btn_sched_delete)
+        list_btn_col.addStretch()
+        table_layout.addLayout(list_btn_col)
+        table_outer.addLayout(table_layout)
+        table_group.setLayout(table_outer)
+        layout.addWidget(table_group, stretch=1)
+
+        exec_group = QGroupBox(tr("Logging & Execution"))
+        exec_layout = QVBoxLayout()
+        dir_row = QHBoxLayout()
+        dir_row.addWidget(QLabel(tr("Save to:")))
+        self.sched_log_dir_display = QLineEdit()
+        self.sched_log_dir_display.setReadOnly(True)
+        self.sched_log_dir_display.setPlaceholderText(
+            tr("Log save folder (leave blank to choose via dialog on completion)")
+        )
+        self.btn_sched_browse_dir = QPushButton(tr("Browse..."))
+        dir_row.addWidget(self.sched_log_dir_display)
+        dir_row.addWidget(self.btn_sched_browse_dir)
+        exec_layout.addLayout(dir_row)
+
+        ctrl_row = QHBoxLayout()
+        self.btn_sched_start = QPushButton(tr("▶ Start Schedule"))
+        self.btn_sched_start.setStyleSheet(
+            "background-color: #4CAF50; color: white; font-weight: bold; padding: 8px 20px;"
+        )
+        self.btn_sched_stop = QPushButton(tr("■ Stop"))
+        self.btn_sched_stop.setStyleSheet(
+            "background-color: #f44336; color: white; font-weight: bold; padding: 8px 20px;"
+        )
+        self.btn_sched_stop.setEnabled(False)
+        self.sched_status_label = QLabel(tr("Status: Ready"))
+        self.sched_status_label.setStyleSheet("color: gray; font-weight: bold;")
+        self.sched_record_label = QLabel(tr("Records: {n}", n=0))
+        self.sched_record_label.setStyleSheet("color: gray;")
+        ctrl_row.addWidget(self.btn_sched_start)
+        ctrl_row.addWidget(self.btn_sched_stop)
+        ctrl_row.addSpacing(16)
+        ctrl_row.addWidget(self.sched_status_label)
+        ctrl_row.addStretch()
+        ctrl_row.addWidget(self.sched_record_label)
+        exec_layout.addLayout(ctrl_row)
+
+        self.sched_warning_label = QLabel("")
+        self.sched_warning_label.setStyleSheet(
+            "color: #b00; font-weight: bold; background: #fff3cd;"
+            "border: 1px solid #f0ad4e; border-radius: 4px; padding: 4px;"
+        )
+        self.sched_warning_label.setWordWrap(True)
+        self.sched_warning_label.setVisible(False)
+        exec_layout.addWidget(self.sched_warning_label)
+        exec_group.setLayout(exec_layout)
+        layout.addWidget(exec_group)
