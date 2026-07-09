@@ -17,19 +17,13 @@ try:
     from .pace5000_ui_main import PaceUI
     from .pace5000_backend import Pace5000Backend
 except ImportError:
-    # Standalone execution
+    # Standalone execution (no parent package) — make this directory's own
+    # modules importable by their bare names.
     _dir = os.path.dirname(os.path.abspath(__file__))
-    sys.path.insert(0, _dir)
-    from apps.PACE5000.pace5000_ui_main import PaceUI
-    from apps.PACE5000.pace5000_backend import Pace5000Backend
-
-try:
-    from settings.i18n import tr
-except ImportError:
-    _pkg = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if _pkg not in sys.path:
-        sys.path.insert(0, _pkg)
-    from settings.i18n import tr
+    if _dir not in sys.path:
+        sys.path.insert(0, _dir)
+    from pace5000_ui_main import PaceUI
+    from pace5000_backend import Pace5000Backend
 
 
 _SETTINGS_PATH = Path(__file__).parent / "__localdata" / "pace5000_settings.json"
@@ -76,7 +70,7 @@ class SchedulePlotWindow(QWidget):
 
     def __init__(self, t0: float, pressure_unit: str, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle(tr("Scheduled Control — Live Pressure"))
+        self.setWindowTitle("Scheduled Control — Live Pressure")
         self.resize(880, 462)
         self._t0        = t0
         self._times     = deque(maxlen=self._MAX_POINTS)
@@ -84,8 +78,8 @@ class SchedulePlotWindow(QWidget):
 
         layout = QVBoxLayout(self)
         self._plot_widget = pg.PlotWidget()
-        self._plot_widget.setLabel("left", tr("Pressure ({unit})", unit=pressure_unit))
-        self._plot_widget.setLabel("bottom", tr("Elapsed Time"), units="s")
+        self._plot_widget.setLabel("left", f"Pressure ({pressure_unit})")
+        self._plot_widget.setLabel("bottom", "Elapsed Time", units="s")
         self._plot_widget.getAxis("left").enableAutoSIPrefix(False)
         self._plot_widget.getAxis("bottom").enableAutoSIPrefix(False)
         self._plot_widget.showGrid(x=True, y=True, alpha=0.2)
@@ -156,7 +150,7 @@ class ScheduledControlRunner(QObject):
         self._wait_timer.stop()
         self._tick_timer.stop()
         self._disconnect_pressure()
-        self.status_changed.emit(tr("Status: Stopped"))
+        self.status_changed.emit("Status: Stopped")
         self.stopped.emit()
 
     def _disconnect_pressure(self):
@@ -174,7 +168,7 @@ class ScheduledControlRunner(QObject):
         if self.current_index >= len(self.items):
             self._tick_timer.stop()
             self._disconnect_pressure()
-            self.status_changed.emit(tr("Status: Complete ✓"))
+            self.status_changed.emit("Status: Complete ✓")
             self.completed.emit()
             return
 
@@ -189,8 +183,7 @@ class ScheduledControlRunner(QObject):
             self._wait_start    = time.time()
             self._wait_timer.start(int(self._wait_duration * 1000))
             self.status_changed.emit(
-                tr("Running [{n}/{total}]: Wait {duration:.1f} s",
-                   n=n, total=total, duration=self._wait_duration)
+                f"Running [{n}/{total}]: Wait {self._wait_duration:.1f} s"
             )
 
         elif item["type"] == "change_pressure":
@@ -221,8 +214,7 @@ class ScheduledControlRunner(QObject):
             self._eta_warning_sent     = False
 
             self.status_changed.emit(
-                tr("Running [{n}/{total}]: Pressure → {target} (monitoring...)",
-                   n=n, total=total, target=self._target_display_str)
+                f"Running [{n}/{total}]: Pressure → {self._target_display_str} (monitoring...)"
             )
 
     def _on_wait_done(self):
@@ -240,8 +232,7 @@ class ScheduledControlRunner(QObject):
         if item["type"] == "wait" and self._wait_start > 0:
             remaining = max(0.0, self._wait_duration - (time.time() - self._wait_start))
             self.status_changed.emit(
-                tr("Running [{n}/{total}]: Wait — {remaining:.1f} s remaining",
-                   n=n, total=total, remaining=remaining)
+                f"Running [{n}/{total}]: Wait — {remaining:.1f} s remaining"
             )
 
         elif item["type"] == "change_pressure" and self._waiting_for_pressure:
@@ -263,22 +254,17 @@ class ScheduledControlRunner(QObject):
             now = time.time()
             if self._pressure_eta and now > self._pressure_eta + self._ETA_WARNING_SEC:
                 delay_min = (now - self._pressure_eta) / 60.0
-                warning_str = tr("  ⚠ ETA exceeded by {delay_min:.1f} min", delay_min=delay_min)
+                warning_str = f"  ⚠ ETA exceeded by {delay_min:.1f} min"
                 if not self._eta_warning_sent:
                     self._eta_warning_sent = True
                     self.pressure_warning.emit(
-                        tr(
-                            "⚠  Pressure has not reached target {target} — "
-                            "{delay_min:.1f} min past the estimated arrival time.\n"
-                            "The sequence continues monitoring. Press Stop to abort.",
-                            target=self._target_display_str, delay_min=delay_min,
-                        )
+                        f"⚠  Pressure has not reached target {self._target_display_str} — "
+                            f"{delay_min:.1f} min past the estimated arrival time.\n"
+                            f"The sequence continues monitoring. Press Stop to abort."
                     )
 
             self.status_changed.emit(
-                tr("Running [{n}/{total}]: Pressure → {target}  (current: {current}){warning}",
-                   n=n, total=total, target=self._target_display_str,
-                   current=current_disp, warning=warning_str)
+                f"Running [{n}/{total}]: Pressure → {self._target_display_str}  (current: {current_disp}){warning_str}"
             )
 
     @staticmethod
@@ -405,24 +391,24 @@ class AppController:
         if conn_type == "tcp":
             ip = self.view.ip_input.text().strip()
             if not ip:
-                QMessageBox.warning(self.view, tr("Error"), tr("Please enter an IP Address."))
+                QMessageBox.warning(self.view, "Error", "Please enter an IP Address.")
                 return
             try:
                 port = int(self.view.port_input.text().strip())
             except ValueError:
-                QMessageBox.warning(self.view, tr("Error"), tr("Port must be an integer."))
+                QMessageBox.warning(self.view, "Error", "Port must be an integer.")
                 return
             _save_settings({**_load_settings(), "connection_type": conn_idx, "ip_address": ip, "port": str(port)})
             self.backend = Pace5000Backend(connection="tcp", ip_address=ip, port=port)
         else:
             com_port = self.view.com_port_input.text().strip()
             if not com_port:
-                QMessageBox.warning(self.view, tr("Error"), tr("Please enter a COM port (e.g. COM1)."))
+                QMessageBox.warning(self.view, "Error", "Please enter a COM port (e.g. COM1).")
                 return
             try:
                 baudrate = int(self.view.baudrate_input.text().strip())
             except ValueError:
-                QMessageBox.warning(self.view, tr("Error"), tr("Baud rate must be an integer."))
+                QMessageBox.warning(self.view, "Error", "Baud rate must be an integer.")
                 return
             _save_settings({**_load_settings(), "connection_type": conn_idx, "com_port": com_port, "baudrate": str(baudrate)})
             self.backend = Pace5000Backend(connection="serial", com_port=com_port, baudrate=baudrate)
@@ -430,7 +416,7 @@ class AppController:
         self.backend.pressure_updated.connect(self.update_plot)
         self.backend.source_pressures_updated.connect(self.update_source_pressures)
         self.backend.error_occurred.connect(self.handle_error)
-        self.view.status_label.setText(tr("Status: Connecting..."))
+        self.view.status_label.setText("Status: Connecting...")
         self.backend.connect_device()
 
     def disconnect_device(self):
@@ -446,7 +432,7 @@ class AppController:
     # ----------------------------------------------------------
     def handle_connection_status(self, connected: bool):
         if connected:
-            self.view.status_label.setText(tr("Status: Connected"))
+            self.view.status_label.setText("Status: Connected")
             self.view.status_label.setStyleSheet("color: green; font-weight: bold;")
             self.view.btn_connect.setEnabled(False)
             self.view.btn_disconnect.setEnabled(True)
@@ -455,9 +441,9 @@ class AppController:
             self.backend.timer.setInterval(interval_ms)
             QTimer.singleShot(100, self._do_initial_fetch)
         else:
-            self.view.status_label.setText(tr("Status: Disconnected"))
+            self.view.status_label.setText("Status: Disconnected")
             self.view.status_label.setStyleSheet("color: red; font-weight: bold;")
-            self.view.source_pressure_label.setText(tr("−ve source:  ---    +ve source:  ---"))
+            self.view.source_pressure_label.setText("−ve source:  ---    +ve source:  ---")
             self._positive_source = None
             self._negative_source = None
             self.view.btn_connect.setEnabled(True)
@@ -488,7 +474,7 @@ class AppController:
 
         unit = self.view.get_pressure_unit()
         self.view.live_pressure_label.setText(
-            tr("Current Pressure:  {value:.4f}  {unit}", value=pressure, unit=unit)
+            f"Current Pressure:  {pressure:.4f}  {unit}"
         )
 
         cutoff = t - 3600
@@ -521,7 +507,7 @@ class AppController:
             if len(self._log_write_buffer) >= 10:
                 self._flush_log()
             if self._log_record_count % 10 == 0:
-                self.view.log_count_label.setText(tr("Records: {n}", n=self._log_record_count))
+                self.view.log_count_label.setText(f"Records: {self._log_record_count}")
 
         if self._sched_logging and self._sched_log_writer:
             elapsed  = t - self._sched_log_start
@@ -533,15 +519,14 @@ class AppController:
             if len(self._sched_log_write_buffer) >= 10:
                 self._flush_sched_log()
             if self._sched_log_record_count % 10 == 0:
-                self.view.sched_record_label.setText(tr("Records: {n}", n=self._sched_log_record_count))
+                self.view.sched_record_label.setText(f"Records: {self._sched_log_record_count}")
 
     def update_source_pressures(self, positive: float, negative: float):
         self._positive_source = positive
         self._negative_source = negative
         unit = self.view.get_pressure_unit()
         self.view.source_pressure_label.setText(
-            tr("−ve source:  {negative:.4f}  {unit}    +ve source:  {positive:.4f}  {unit}",
-               negative=negative, positive=positive, unit=unit)
+            f"−ve source:  {negative:.4f}  {unit}    +ve source:  {positive:.4f}  {unit}"
         )
 
     # ----------------------------------------------------------
@@ -555,7 +540,7 @@ class AppController:
             else default_name
         )
         path, _ = QFileDialog.getSaveFileName(
-            self.view, tr("Save Log Data"), default,
+            self.view, "Save Log Data", default,
             "CSV Files (*.csv);;All Files (*)",
         )
         if not path:
@@ -571,7 +556,7 @@ class AppController:
             writer.writerow(["Timestamp", "Elapsed_s", f"Pressure_{unit}", f"Source_neg_{unit}", f"Source_pos_{unit}"])
             f.flush()
         except Exception as e:
-            QMessageBox.critical(self.view, tr("File Error"), tr("Cannot open log file.\n{error}", error=e))
+            QMessageBox.critical(self.view, "File Error", f"Cannot open log file.\n{e}")
             return
         self._log_file           = f
         self._log_writer         = writer
@@ -583,9 +568,9 @@ class AppController:
         self.view.btn_log_start.setEnabled(False)
         self.view.btn_log_stop.setEnabled(True)
         self.view.set_pressure_unit_enabled(False)
-        self.view.log_status_label.setText(tr("Log: Recording ●"))
+        self.view.log_status_label.setText("Log: Recording ●")
         self.view.log_status_label.setStyleSheet("color: red; font-weight: bold;")
-        self.view.log_count_label.setText(tr("Records: {n}", n=0))
+        self.view.log_count_label.setText("Records: 0")
 
     def stop_logging(self):
         if not self._logging_active:
@@ -605,11 +590,11 @@ class AppController:
         self.view.set_pressure_unit_enabled(True)
         if self.backend and self.backend._is_connected:
             self.view.btn_log_start.setEnabled(True)
-        self.view.log_status_label.setText(tr("Log: Stopped"))
+        self.view.log_status_label.setText("Log: Stopped")
         self.view.log_status_label.setStyleSheet("color: gray; font-weight: bold;")
         QMessageBox.information(
-            self.view, tr("Logging Stopped"),
-            tr("Saved {n} records.\n\n{path}", n=count, path=path),
+            self.view, "Logging Stopped",
+            f"Saved {count} records.\n\n{path}",
         )
 
     def _flush_log(self):
@@ -619,7 +604,7 @@ class AppController:
             self._log_writer.writerows(self._log_write_buffer)
             self._log_file.flush()
         except Exception as e:
-            QMessageBox.critical(self.view, tr("Write Error"), tr("Failed to write log.\n{error}", error=e))
+            QMessageBox.critical(self.view, "Write Error", f"Failed to write log.\n{e}")
         self._log_write_buffer.clear()
 
     def _flush_sched_log(self):
@@ -629,7 +614,7 @@ class AppController:
             self._sched_log_writer.writerows(self._sched_log_write_buffer)
             self._sched_log_file.flush()
         except Exception as e:
-            QMessageBox.critical(self.view, tr("Write Error"), tr("Failed to write schedule log.\n{error}", error=e))
+            QMessageBox.critical(self.view, "Write Error", f"Failed to write schedule log.\n{e}")
         self._sched_log_write_buffer.clear()
 
     # ----------------------------------------------------------
@@ -642,7 +627,7 @@ class AppController:
 
     def update_target(self):
         if not self.backend or not self.backend._is_connected:
-            QMessageBox.warning(self.view, tr("Error"), tr("Device not connected!"))
+            QMessageBox.warning(self.view, "Error", "Device not connected!")
             return
         try:
             val = float(self.view.target_input.text())
@@ -650,25 +635,21 @@ class AppController:
             rate_val = self.view.rate_input.text().strip()
             rate_unit = f"{self.view.rate_pressure_unit_display.text()}/{self.view.rate_time_combo.currentText()}"
         except ValueError:
-            QMessageBox.warning(self.view, tr("Error"), tr("Invalid target pressure. Numbers only."))
+            QMessageBox.warning(self.view, "Error", "Invalid target pressure. Numbers only.")
             return
         if self._positive_source is not None and val > self._positive_source:
             QMessageBox.warning(
-                self.view, tr("Target Exceeds +ve Source"),
-                tr(
-                    "Set value ({val:.4g} {unit}) exceeds +ve source pressure "
-                    "({source:.4g} {unit}).\n"
-                    "Target has not been updated.",
-                    val=val, unit=unit, source=self._positive_source,
-                )
+                self.view, "Target Exceeds +ve Source",
+                f"Set value ({val:.4g} {unit}) exceeds +ve source pressure "
+                    f"({self._positive_source:.4g} {unit}).\n"
+                    f"Target has not been updated."
             )
             self.view.target_input.setText(self._last_target_str)
             return
         if self.view.chk_confirm_before_apply.isChecked():
-            msg = tr("Go to {val} {unit} at {rate} {rate_unit}?",
-                     val=val, unit=unit, rate=rate_val, rate_unit=rate_unit)
+            msg = f"Go to {val} {unit} at {rate_val} {rate_unit}?"
             reply = QMessageBox.question(
-                self.view, tr("Confirm"), msg,
+                self.view, "Confirm", msg,
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             )
             if reply != QMessageBox.StandardButton.Ok:
@@ -678,11 +659,11 @@ class AppController:
         self.backend.set_target_pressure(val)
         self._last_target_str = self.view.target_input.text()
         self.view.target_input.setStyleSheet("background-color: #e6ffe6;")
-        QMessageBox.information(self.view, tr("Success"), tr("Target updated to: {val} {unit}", val=val, unit=unit))
+        QMessageBox.information(self.view, "Success", f"Target updated to: {val} {unit}")
 
     def update_rate(self):
         if not self.backend or not self.backend._is_connected:
-            QMessageBox.warning(self.view, tr("Error"), tr("Device not connected!"))
+            QMessageBox.warning(self.view, "Error", "Device not connected!")
             return
         try:
             val = float(self.view.rate_input.text())
@@ -691,23 +672,23 @@ class AppController:
             unit = f"{pressure_unit}/{time_unit}"
             self.backend.set_slew_rate(val, unit)
             self.view.rate_input.setStyleSheet("background-color: #e6ffe6;")
-            QMessageBox.information(self.view, tr("Success"), tr("Rate updated to: {val} {unit}", val=val, unit=unit))
+            QMessageBox.information(self.view, "Success", f"Rate updated to: {val} {unit}")
         except ValueError:
-            QMessageBox.warning(self.view, tr("Error"), tr("Invalid rate value. Numbers only."))
+            QMessageBox.warning(self.view, "Error", "Invalid rate value. Numbers only.")
 
     def _apply_relative_change(self, sign: int):
         if not self.backend or not self.backend._is_connected:
-            QMessageBox.warning(self.view, tr("Error"), tr("Device not connected!"))
+            QMessageBox.warning(self.view, "Error", "Device not connected!")
             return
         try:
             current = float(self.view.target_input.text())
         except ValueError:
-            QMessageBox.warning(self.view, tr("Error"), tr("No valid target pressure in the input field."))
+            QMessageBox.warning(self.view, "Error", "No valid target pressure in the input field.")
             return
         try:
             step = float(self.view.rel_step_spinbox.text())
         except ValueError:
-            QMessageBox.warning(self.view, tr("Error"), tr("Invalid step value."))
+            QMessageBox.warning(self.view, "Error", "Invalid step value.")
             return
         new_val   = current + sign * step
         unit      = self.view.get_pressure_unit()
@@ -715,13 +696,10 @@ class AppController:
         self.backend.write(f":UNIT:PRES {scpi_unit}")
         if self._positive_source is not None and new_val > self._positive_source:
             QMessageBox.warning(
-                self.view, tr("Target Exceeds +ve Source"),
-                tr(
-                    "Set value ({val:.4g} {unit}) exceeds +ve source pressure "
-                    "({source:.4g} {unit}).\n"
-                    "Target has not been updated.",
-                    val=new_val, unit=unit, source=self._positive_source,
-                )
+                self.view, "Target Exceeds +ve Source",
+                f"Set value ({new_val:.4g} {unit}) exceeds +ve source pressure "
+                    f"({self._positive_source:.4g} {unit}).\n"
+                    f"Target has not been updated."
             )
             return
         self.backend.set_target_pressure(new_val)
@@ -756,7 +734,7 @@ class AppController:
 
     def _on_target_pressure_unit_changed(self, unit: str):
         self.view.rate_pressure_unit_display.setText(unit)
-        self.view.plot_widget.setLabel("left", tr("Pressure ({unit})", unit=unit))
+        self.view.plot_widget.setLabel("left", f"Pressure ({unit})")
         if self.backend and self.backend._is_connected:
             scpi_unit = "MPA" if unit == "MPa" else "BAR"
             self.backend.write(f":UNIT:PRES {scpi_unit}")
@@ -807,14 +785,14 @@ class AppController:
     def _enter_edit_mode(self, index: int):
         self._edit_index = index
         self._populate_form(self._schedule_items[index])
-        self.view.btn_sched_add.setText(tr("✎ Update Item {n}", n=index + 1))
+        self.view.btn_sched_add.setText(f"✎ Update Item {index + 1}")
         self.view.btn_sched_cancel_edit.setVisible(True)
         self.view.sched_list.setCurrentRow(index)
 
     def _exit_edit_mode(self):
         self._edit_index = None
         self._clear_form()
-        self.view.btn_sched_add.setText(tr("＋ Add to Schedule"))
+        self.view.btn_sched_add.setText("＋ Add to Schedule")
         self.view.btn_sched_cancel_edit.setVisible(False)
 
     def sched_edit_item(self):
@@ -833,7 +811,7 @@ class AppController:
                 if duration <= 0:
                     raise ValueError
             except ValueError:
-                QMessageBox.warning(self.view, tr("Error"), tr("Please enter a positive number of seconds."))
+                QMessageBox.warning(self.view, "Error", "Please enter a positive number of seconds.")
                 return
             new_item = {"type": "wait", "duration": duration}
         else:
@@ -843,7 +821,7 @@ class AppController:
                 if rate <= 0:
                     raise ValueError
             except ValueError:
-                QMessageBox.warning(self.view, tr("Error"), tr("Please enter valid numbers for pressure and rate."))
+                QMessageBox.warning(self.view, "Error", "Please enter valid numbers for pressure and rate.")
                 return
             new_item = {
                 "type":          "change_pressure",
@@ -870,7 +848,7 @@ class AppController:
                     self._exit_edit_mode()
                 elif self._edit_index > row:
                     self._edit_index -= 1
-                    self.view.btn_sched_add.setText(tr("✎ Update Item {n}", n=self._edit_index + 1))
+                    self.view.btn_sched_add.setText(f"✎ Update Item {self._edit_index + 1}")
             self._refresh_sched_list()
 
     def sched_move_up(self):
@@ -909,20 +887,16 @@ class AppController:
     def _format_item(i: int, item: dict) -> str:
         n = i + 1
         if item["type"] == "wait":
-            return tr("{n}.  Wait — {duration:.1f} s", n=n, duration=item["duration"])
-        return tr(
-            "{n}.  Change Pressure — {pressure:.4g} {pressure_unit}  @  {rate:.4g} {rate_unit}",
-            n=n, pressure=item["pressure"], pressure_unit=item["pressure_unit"],
-            rate=item["rate"], rate_unit=item["rate_unit"],
-        )
+            return f'{n}.  Wait — {item["duration"]:.1f} s'
+        return f'{n}.  Change Pressure — {item["pressure"]:.4g} {item["pressure_unit"]}  @  {item["rate"]:.4g} {item["rate_unit"]}'
 
     def sched_save(self):
         if not self._schedule_items:
-            QMessageBox.warning(self.view, tr("Save Schedule"), tr("Schedule is empty."))
+            QMessageBox.warning(self.view, "Save Schedule", "Schedule is empty.")
             return
         default = datetime.now().strftime("schedule_%Y%m%d_%H%M%S.json")
         path, _ = QFileDialog.getSaveFileName(
-            self.view, tr("Save Schedule"), default,
+            self.view, "Save Schedule", default,
             "PACE Schedule (*.json);;All Files (*)",
         )
         if not path:
@@ -931,14 +905,14 @@ class AppController:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump({"version": 1, "items": self._schedule_items}, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            QMessageBox.critical(self.view, tr("Save Error"), tr("Failed to save schedule.\n{error}", error=e))
+            QMessageBox.critical(self.view, "Save Error", f"Failed to save schedule.\n{e}")
 
     def sched_load(self):
         if self._runner:
-            QMessageBox.warning(self.view, tr("Load Schedule"), tr("Cannot load while a schedule is running."))
+            QMessageBox.warning(self.view, "Load Schedule", "Cannot load while a schedule is running.")
             return
         path, _ = QFileDialog.getOpenFileName(
-            self.view, tr("Load Schedule"), "",
+            self.view, "Load Schedule", "",
             "PACE Schedule (*.json);;All Files (*)",
         )
         if not path:
@@ -968,12 +942,12 @@ class AppController:
             self._exit_edit_mode()
             self._refresh_sched_list()
         except (KeyError, ValueError, json.JSONDecodeError) as e:
-            QMessageBox.critical(self.view, tr("Load Error"), tr("Failed to load schedule.\n{error}", error=e))
+            QMessageBox.critical(self.view, "Load Error", f"Failed to load schedule.\n{e}")
 
     # ----------------------------------------------------------
     def sched_browse_dir(self):
         directory = QFileDialog.getExistingDirectory(
-            self.view, tr("Select Log Save Folder"), self._sched_log_dir or ""
+            self.view, "Select Log Save Folder", self._sched_log_dir or ""
         )
         if directory:
             self._sched_log_dir = directory
@@ -982,10 +956,10 @@ class AppController:
 
     def sched_start(self):
         if not self.backend or not self.backend._is_connected:
-            QMessageBox.warning(self.view, tr("Error"), tr("Device is not connected."))
+            QMessageBox.warning(self.view, "Error", "Device is not connected.")
             return
         if not self._schedule_items:
-            QMessageBox.warning(self.view, tr("Error"), tr("Schedule is empty."))
+            QMessageBox.warning(self.view, "Error", "Schedule is empty.")
             return
 
         ts           = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -996,7 +970,7 @@ class AppController:
             else default_name
         )
         path, _ = QFileDialog.getSaveFileName(
-            self.view, tr("Save Schedule Log"), default_path,
+            self.view, "Save Schedule Log", default_path,
             "CSV Files (*.csv);;All Files (*)",
         )
         if not path:
@@ -1013,7 +987,7 @@ class AppController:
             writer.writerow(["Timestamp", "Elapsed_s", f"Pressure_{unit}", f"Source_neg_{unit}", f"Source_pos_{unit}"])
             f.flush()
         except Exception as e:
-            QMessageBox.critical(self.view, tr("File Error"), tr("Cannot open log file.\n{error}", error=e))
+            QMessageBox.critical(self.view, "File Error", f"Cannot open log file.\n{e}")
             return
 
         self._sched_log_file         = f
@@ -1023,7 +997,7 @@ class AppController:
         self._sched_log_record_count = 0
         self._sched_log_start        = time.time()
         self._sched_logging          = True
-        self.view.sched_record_label.setText(tr("Records: {n}", n=0))
+        self.view.sched_record_label.setText("Records: 0")
         self.view.sched_warning_label.setVisible(False)
         self.view.set_pressure_unit_enabled(False)
 
@@ -1036,7 +1010,7 @@ class AppController:
 
         self.view.btn_sched_start.setEnabled(False)
         self.view.btn_sched_stop.setEnabled(True)
-        self.view.sched_status_label.setText(tr("Status: Starting..."))
+        self.view.sched_status_label.setText("Status: Starting...")
         self.view.sched_status_label.setStyleSheet("color: blue; font-weight: bold;")
 
         self.view.tabs.setTabEnabled(0, False)
@@ -1089,9 +1063,9 @@ class AppController:
                     self.backend.pressure_updated.disconnect(self._sched_plot_window.add_point)
                 except Exception:
                     pass
-            suffix = tr("Complete") if completed else tr("Stopped")
+            suffix = "Complete" if completed else "Stopped"
             self._sched_plot_window.setWindowTitle(
-                tr("Scheduled Control — Live Pressure [{suffix}]", suffix=suffix)
+                f"Scheduled Control — Live Pressure [{suffix}]"
             )
 
         self.view.btn_sched_start.setEnabled(True)
@@ -1099,13 +1073,13 @@ class AppController:
         self.view.set_pressure_unit_enabled(True)
         style = "color: green; font-weight: bold;" if completed else "color: orange; font-weight: bold;"
         self.view.sched_status_label.setStyleSheet(style)
-        self.view.sched_record_label.setText(tr("Records: {n}", n=count))
+        self.view.sched_record_label.setText(f"Records: {count}")
 
         if count > 0:
-            title = tr("Schedule Complete") if completed else tr("Schedule Stopped")
+            title = "Schedule Complete" if completed else "Schedule Stopped"
             QMessageBox.information(
                 self.view, title,
-                tr("Saved {n} records.\n\n{path}", n=count, path=path),
+                f"Saved {count} records.\n\n{path}",
             )
 
     def handle_error(self, err_msg: str):
@@ -1125,7 +1099,7 @@ class Pace5000Window(QMainWindow):
 
     def __init__(self, backend: Pace5000Backend = None):
         super().__init__()
-        self.setWindowTitle(tr("Druck PACE5000 Controller"))
+        self.setWindowTitle("Druck PACE5000 Controller")
         view = PaceUI()
         self._controller = AppController(view, backend=backend)
         self.setCentralWidget(view)
