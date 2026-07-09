@@ -26,7 +26,7 @@ pip install PyQt6 pyqtgraph pyserial
 ## Usage
 
 ```
-python main.py
+python pace5000_app.py
 ```
 
 Connection settings (IP, port, COM port, baud rate) are saved automatically to `pace5000_settings.json`.
