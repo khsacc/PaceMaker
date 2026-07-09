@@ -10,6 +10,12 @@ pg.setConfigOption('background', 'w')
 pg.setConfigOption('foreground', 'k')
 
 
+def _no_wheel(widget):
+    """Spin/combo boxes must not react to mouse-wheel scrolling — scrolling a
+    panel that happens to be under the cursor should never change a value."""
+    widget.wheelEvent = lambda event: event.ignore()
+
+
 class PaceUI(QWidget):
     def __init__(self):
         super().__init__()
@@ -69,6 +75,51 @@ class PaceUI(QWidget):
         # Show TCP fields by default, hide serial fields
         self._set_conn_fields_visible(tcp=True)
         self.conn_type_combo.currentIndexChanged.connect(self._on_conn_type_changed)
+
+        # API Server group — standalone-only; hidden entirely by AppController
+        # when the backend is managed externally (embedded mode, e.g. main.py).
+        self.api_group = QGroupBox("API Server")
+        api_layout = QHBoxLayout()
+
+        self.api_enable_cb = QCheckBox("Enable")
+        self.api_enable_cb.setEnabled(False)  # enabled once connected
+
+        self.api_host_label = QLabel("Host:")
+        self.api_host_input = QLineEdit("127.0.0.1")
+        self.api_host_input.setMaximumWidth(120)
+
+        self.api_port_label = QLabel("Port:")
+        self.api_port_spin = QSpinBox()
+        self.api_port_spin.setRange(1, 65535)
+        self.api_port_spin.setValue(8765)
+        self.api_port_spin.setMaximumWidth(80)
+        _no_wheel(self.api_port_spin)
+
+        self.api_key_label = QLabel("API Key:")
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setReadOnly(True)
+        self.api_key_input.setMinimumWidth(220)
+        self.btn_api_regenerate = QPushButton("Regenerate")
+        self.btn_api_copy = QPushButton("Copy")
+
+        self.api_status_label = QLabel("Stopped")
+        self.api_status_label.setStyleSheet("color: gray; font-weight: bold;")
+
+        api_layout.addWidget(self.api_enable_cb)
+        api_layout.addSpacing(8)
+        api_layout.addWidget(self.api_host_label)
+        api_layout.addWidget(self.api_host_input)
+        api_layout.addWidget(self.api_port_label)
+        api_layout.addWidget(self.api_port_spin)
+        api_layout.addWidget(self.api_key_label)
+        api_layout.addWidget(self.api_key_input)
+        api_layout.addWidget(self.btn_api_regenerate)
+        api_layout.addWidget(self.btn_api_copy)
+        api_layout.addSpacing(16)
+        api_layout.addWidget(self.api_status_label)
+        api_layout.addStretch()
+        self.api_group.setLayout(api_layout)
+        main_layout.addWidget(self.api_group)
 
         self.tabs = QTabWidget()
         self.tab_main = QWidget()
