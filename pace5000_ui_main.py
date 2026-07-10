@@ -76,8 +76,12 @@ class PaceUI(QWidget):
         self._set_conn_fields_visible(tcp=True)
         self.conn_type_combo.currentIndexChanged.connect(self._on_conn_type_changed)
 
-        # API Server group — standalone-only; hidden entirely by AppController
-        # when the backend is managed externally (embedded mode, e.g. main.py).
+        # API Server group — standalone-only. Not added to main_layout: it
+        # lives in a separate subwindow opened from the "API" menu (see
+        # Pace5000Window._setup_api_menu in pace5000_app.py), keeping it out
+        # of the way for the majority of users who don't need it. Hidden
+        # entirely (the whole "API" menu) when the backend is managed
+        # externally (embedded mode, e.g. main.py).
         self.api_group = QGroupBox("API Server")
         api_layout = QHBoxLayout()
 
@@ -119,7 +123,6 @@ class PaceUI(QWidget):
         api_layout.addWidget(self.api_status_label)
         api_layout.addStretch()
         self.api_group.setLayout(api_layout)
-        main_layout.addWidget(self.api_group)
 
         self.tabs = QTabWidget()
         self.tab_main = QWidget()
@@ -159,6 +162,10 @@ class PaceUI(QWidget):
         self.live_pressure_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.live_pressure_label.setStyleSheet("font-size: 22px; color: black;")
         plot_layout.addWidget(self.live_pressure_label)
+        self.setpoint_live_label = QLabel("Target Pressure:  ---    Slew Rate:  ---")
+        self.setpoint_live_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setpoint_live_label.setStyleSheet("font-size: 10pt; color: #555;")
+        plot_layout.addWidget(self.setpoint_live_label)
         self.source_pressure_label = QLabel("−ve source:  ---    +ve source:  ---")
         self.source_pressure_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.source_pressure_label.setStyleSheet("font-size: 10pt; color: #555;")

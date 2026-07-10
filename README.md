@@ -35,7 +35,7 @@ The last-used log save directory is also persisted in `pace5000_settings.json` a
 
 ## API
 
-Only available when running `pace5000_app.py` standalone (not when this app is embedded in another launcher). Enable it from the **API Server** panel once connected, or auto-start it with `--api` on the command line:
+Only available when running `pace5000_app.py` standalone (not when this app is embedded in another launcher). Open **API → Configure and start API** from the menu bar once connected and enable it there, or auto-start it with `--api` on the command line:
 
 ```
 python pace5000_app.py --api --api-host 0.0.0.0 --api-port 8765 --api-key <key>

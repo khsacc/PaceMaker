@@ -14,12 +14,23 @@ RATE_UNIT_TO_MPA_PER_MIN: dict[str, float] = {
     "MPa/sec": 60.0, "Bar/sec": 6.0,
 }
 
+# Hardware floor: below this the PACE5000's own slew resolution becomes
+# unreliable. Enforced in the GUI regardless of which pressure/time unit the
+# user is working in — see rate_to_mpa_per_sec().
+MIN_SLEW_RATE_MPA_PER_SEC = 0.001
+
+
+def rate_to_mpa_per_sec(value: float, unit: str) -> float:
+    """Convert a slew rate given in any of RATE_UNIT_TO_MPA_PER_MIN's units to MPa/sec."""
+    return value * RATE_UNIT_TO_MPA_PER_MIN.get(unit, 1.0) / 60.0
+
 
 class Pace5000Backend(QObject):
 
     connection_status_changed = pyqtSignal(bool)
     pressure_updated = pyqtSignal(float)
     source_pressures_updated = pyqtSignal(float, float)  # (positive, negative)
+    setpoint_updated = pyqtSignal(float, float)  # (target, slew_rate_per_sec) — both in the device's current pressure unit
     error_occurred = pyqtSignal(str)
 
     def __init__(self, connection="tcp", ip_address=None, port=5025, com_port=None, baudrate=9600):
@@ -229,6 +240,13 @@ class Pace5000Backend(QObject):
         neg = self.get_negative_source_pressure()
         if pos is not None and neg is not None:
             self.source_pressures_updated.emit(pos, neg)
+        target_raw = self.get_target_pressure()
+        slew_raw = self.get_slew_rate()
+        if target_raw is not None and slew_raw is not None:
+            try:
+                self.setpoint_updated.emit(float(target_raw), float(slew_raw))
+            except ValueError:
+                pass
 
     # ── High-level, thread-safe operations ──────────────────────────────
     #
