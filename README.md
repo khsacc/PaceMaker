@@ -11,6 +11,12 @@ A PyQt6 desktop GUI for controlling and logging a **Druck PACE5000** pressure co
 - **Scheduled control**: build a sequence of pressure steps and waits, save/load as JSON, and run with live plot and automatic logging
 - **HTTP API** (standalone mode only): control and monitor the device from another process on the same machine, or another machine on the LAN — see [API](#api) below
 
+### Main window
+![GUI Main Window](./docs/screenshot_main.jpg)
+
+### Scheduled control window
+![GUI scheduled control window](./docs/screenshot_schedule.jpg)
+
 ## Requirements
 
 - Python 3.11+
