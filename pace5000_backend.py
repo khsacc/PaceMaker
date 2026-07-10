@@ -1,8 +1,28 @@
 import socket
 import time
 import serial
-from threading import Lock
+from threading import Lock, Event
+from typing import Callable, Optional
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
+
+# Pressure/rate unit factors relative to MPa (the SCPI-native unit — the
+# device is always initialized to :UNIT:PRES MPA). GPa is intentionally not
+# supported here: it is never sent to the device.
+PRESSURE_UNIT_TO_MPA: dict[str, float] = {"MPa": 1.0, "Bar": 0.1}
+RATE_UNIT_TO_MPA_PER_MIN: dict[str, float] = {
+    "MPa/min": 1.0, "Bar/min": 0.1,
+    "MPa/sec": 60.0, "Bar/sec": 6.0,
+}
+
+# Hardware floor: below this the PACE5000's own slew resolution becomes
+# unreliable. Enforced in the GUI regardless of which pressure/time unit the
+# user is working in — see rate_to_mpa_per_sec().
+MIN_SLEW_RATE_MPA_PER_SEC = 0.001
+
+
+def rate_to_mpa_per_sec(value: float, unit: str) -> float:
+    """Convert a slew rate given in any of RATE_UNIT_TO_MPA_PER_MIN's units to MPa/sec."""
+    return value * RATE_UNIT_TO_MPA_PER_MIN.get(unit, 1.0) / 60.0
 
 
 class Pace5000Backend(QObject):
@@ -10,6 +30,7 @@ class Pace5000Backend(QObject):
     connection_status_changed = pyqtSignal(bool)
     pressure_updated = pyqtSignal(float)
     source_pressures_updated = pyqtSignal(float, float)  # (positive, negative)
+    setpoint_updated = pyqtSignal(float, float)  # (target, slew_rate_per_sec) — both in the device's current pressure unit
     error_occurred = pyqtSignal(str)
 
     def __init__(self, connection="tcp", ip_address=None, port=5025, com_port=None, baudrate=9600):
@@ -219,3 +240,126 @@ class Pace5000Backend(QObject):
         neg = self.get_negative_source_pressure()
         if pos is not None and neg is not None:
             self.source_pressures_updated.emit(pos, neg)
+        target_raw = self.get_target_pressure()
+        slew_raw = self.get_slew_rate()
+        if target_raw is not None and slew_raw is not None:
+            try:
+                self.setpoint_updated.emit(float(target_raw), float(slew_raw))
+            except ValueError:
+                pass
+
+    # ── High-level, thread-safe operations ──────────────────────────────
+    #
+    # These are safe to call from any thread (QThread, a plain
+    # threading.Thread, or an HTTP request-handler thread): all device I/O
+    # goes through write()/query(), which serialize on self.lock. They do
+    # NOT depend on a running Qt event loop. They are the single, shared
+    # implementation of "change pressure" / "wait for pressure reached",
+    # used by apps/exp_scheduler, this app's own Scheduled Control feature,
+    # and (if enabled) the HTTP API — do not re-implement this logic
+    # elsewhere; call these instead.
+
+    def set_pressure_with_ramp(
+        self,
+        pressure_mpa: float,
+        rate_mpa_per_min: float,
+        check_source_pressure: bool = True,
+        slew_verify_retries: int = 3,
+        on_slew_send: Optional[Callable[[], None]] = None,
+        on_slew_verified: Optional[Callable[[float], None]] = None,
+    ) -> None:
+        """Set the target pressure, ramping at rate_mpa_per_min.
+
+        Critical ordering: the slew rate is sent and read back to confirm the
+        device actually applied it *before* the setpoint is sent. Sending the
+        setpoint first (or without verifying the rate) risks the device
+        applying the new setpoint at whatever rate was previously in effect.
+
+        Raises RuntimeError if the target exceeds the +ve source pressure
+        (when check_source_pressure is True), or if the slew rate cannot be
+        verified after slew_verify_retries consecutive attempts.
+        """
+        self.write(":UNIT:PRES MPA")
+
+        if check_source_pressure:
+            pos_source = self.get_positive_source_pressure()
+            if pos_source is not None and pressure_mpa > pos_source:
+                raise RuntimeError(
+                    f"Set pressure {pressure_mpa:.4g} MPa exceeds +ve source pressure "
+                    f"({pos_source:.4g} MPa). Aborting — increase source pressure first."
+                )
+
+        if on_slew_send is not None:
+            on_slew_send()
+        self.set_slew_rate(rate_mpa_per_min, unit="MPa/min")
+
+        expected_mpa_per_sec = rate_mpa_per_min / 60.0
+        consecutive_failures = 0
+        while True:
+            actual_slew_str = self.get_slew_rate()
+            if actual_slew_str is not None:
+                actual_mpa_per_sec = float(actual_slew_str)
+                if abs(actual_mpa_per_sec - expected_mpa_per_sec) <= 1e-5:
+                    if on_slew_verified is not None:
+                        on_slew_verified(actual_mpa_per_sec)
+                    break
+                consecutive_failures += 1
+                if consecutive_failures >= slew_verify_retries:
+                    raise RuntimeError(
+                        f"PACE5000 slew rate verification failed "
+                        f"({slew_verify_retries} consecutive): "
+                        f"sent {rate_mpa_per_min:.6f} MPa/min "
+                        f"({expected_mpa_per_sec:.6f} MPa/s), "
+                        f"device reports {actual_mpa_per_sec:.6f} MPa/s"
+                    )
+            else:
+                consecutive_failures += 1
+                if consecutive_failures >= slew_verify_retries:
+                    raise RuntimeError(
+                        f"PACE5000 slew rate verification failed "
+                        f"({slew_verify_retries} consecutive): no response from device"
+                    )
+            time.sleep(0.2)
+
+        self.set_target_pressure(pressure_mpa)
+
+    def wait_for_pressure(
+        self,
+        tol_mpa: float,
+        stop_event: Optional[Event] = None,
+        timeout_s: Optional[float] = None,
+        poll_interval_s: float = 0.2,
+        on_update: Optional[Callable[[float, float], None]] = None,
+    ) -> Optional[float]:
+        """Block until the measured pressure is within tol_mpa of the
+        device's current target setpoint (read via get_target_pressure()).
+
+        Returns the final measured pressure on success. Returns None if
+        stop_event is set before the target is reached (cooperative
+        cancellation — callers translate this into their own
+        cancellation/abort signalling; this module intentionally raises no
+        caller-specific exception type). Raises TimeoutError if timeout_s
+        elapses first, or RuntimeError if the target pressure cannot be read.
+        """
+        self.write(":UNIT:PRES MPA")
+        raw = self.get_target_pressure()
+        if raw is None:
+            raise RuntimeError("Cannot read PACE5000 target pressure")
+        target_mpa = float(raw)
+
+        deadline = time.monotonic() + timeout_s if timeout_s is not None else None
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                return None
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for pressure to reach "
+                    f"{target_mpa:.3f} MPa ± {tol_mpa:.4f} MPa"
+                )
+            current = self.get_pressure()
+            if current is not None:
+                if on_update is not None:
+                    on_update(current, target_mpa)
+                if abs(current - target_mpa) <= tol_mpa:
+                    return current
+            time.sleep(poll_interval_s)

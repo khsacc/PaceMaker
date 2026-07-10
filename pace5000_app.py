@@ -1,29 +1,43 @@
 from __future__ import annotations
 
 import os
-import sys
 import csv
 import json
+import threading
 import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox, QFileDialog, QWidget, QVBoxLayout
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QMessageBox, QFileDialog, QWidget, QVBoxLayout, QGroupBox,
+)
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, Qt
 import pyqtgraph as pg
 
-try:
-    from .pace5000_ui_main import PaceUI
-    from .pace5000_backend import Pace5000Backend
-except ImportError:
-    # Standalone execution (no parent package) — make this directory's own
-    # modules importable by their bare names.
-    _dir = os.path.dirname(os.path.abspath(__file__))
-    if _dir not in sys.path:
-        sys.path.insert(0, _dir)
-    from pace5000_ui_main import PaceUI
-    from pace5000_backend import Pace5000Backend
+# This module is only ever imported as part of a package — never run
+# directly, and never imported via a bare/sys.path-hacked fallback. Two
+# call sites do this:
+#   - main.py (embedded mode) imports it as `apps.PACE5000.pace5000_app`.
+#   - apps/PACE5000/app.py (the standalone launcher) registers this
+#     directory as an in-memory package under a private name and imports
+#     it as a submodule of that — this works whether or not apps/PACE5000/
+#     happens to sit inside an enclosing `apps` package, e.g. when this
+#     directory's own repository (PaceMaker) is git-cloned on its own.
+# Either way this module always has a real __package__, so relative imports
+# resolve correctly and these files are never loaded twice under two
+# different module identities in the same process. Always use plain
+# relative imports here.
+from .pace5000_ui_main import PaceUI
+from .pace5000_backend import (
+    Pace5000Backend, PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN,
+    MIN_SLEW_RATE_MPA_PER_SEC, rate_to_mpa_per_sec,
+)
+from .pace5000_api import Pace5000ApiServer, generate_api_key
+
+
+def _format_num(value: float) -> str:
+    return f"{value:.6g}"
 
 
 _SETTINGS_PATH = Path(__file__).parent / "__localdata" / "pace5000_settings.json"
@@ -34,6 +48,9 @@ _DEFAULT_SETTINGS = {
     "com_port": "COM1",
     "baudrate": "9600",
     "last_log_dir": "",
+    "api_host": "127.0.0.1",
+    "api_port": "8765",
+    "api_key": "",
 }
 
 
@@ -95,6 +112,25 @@ class SchedulePlotWindow(QWidget):
 
 
 # ==============================================================
+# API Server — Configuration Subwindow
+# ==============================================================
+
+class ApiConfigWindow(QWidget):
+    """Standalone-only subwindow hosting the API Server configuration group.
+
+    Kept out of the main window (opened via the "API" menu) so it doesn't
+    take up permanent space for the majority of users who never touch it.
+    """
+
+    def __init__(self, api_group: QGroupBox, parent=None):
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setWindowTitle("PACE5000 — API Server Configuration")
+        layout = QVBoxLayout(self)
+        layout.addWidget(api_group)
+        self.resize(560, 150)
+
+
+# ==============================================================
 # Scheduled Control Runner
 # ==============================================================
 
@@ -102,12 +138,19 @@ class ScheduledControlRunner(QObject):
     status_changed   = pyqtSignal(str)
     item_activated   = pyqtSignal(int)
     pressure_warning = pyqtSignal(str)
+    error_occurred   = pyqtSignal(str)
     completed        = pyqtSignal()
     stopped          = pyqtSignal()
 
+    # Internal, cross-thread plumbing only (see _wait_pressure_worker below).
+    # Not part of the public interface — external code should connect to the
+    # signals above, not these.
+    _pressure_progress   = pyqtSignal(float, float)   # current_mpa, target_mpa
+    _pressure_reached    = pyqtSignal()
+    _pressure_wait_error = pyqtSignal(str)
+
     _ETA_WARNING_SEC = 300
-    _PRESSURE_TOL = {"MPA": 0.0001, "BAR": 0.0001}
-    _UNIT_SCPI = {"MPa": "MPA", "Bar": "BAR"}
+    _DEFAULT_PRESSURE_TOL_MPA = 0.0001
 
     def __init__(self, items: list, backend: Pace5000Backend, parent=None):
         super().__init__(parent)
@@ -127,21 +170,25 @@ class ScheduledControlRunner(QObject):
         self._wait_start    = 0.0
         self._wait_duration = 0.0
 
-        self._latest_pressure     = None
-        self._waiting_for_pressure = False
-        self._target_pressure      = 0.0
-        self._target_display_str   = ""
-        self._target_scpi_unit     = "BAR"
-        self._device_scpi_unit     = "BAR"
-        self._pressure_eta         = None
-        self._eta_warning_sent     = False
+        self._target_pressure_mpa = 0.0
+        self._target_display_str  = ""
+        self._pressure_eta        = None
+        self._eta_warning_sent    = False
+
+        # Pressure-reached waiting runs in a background thread (it can take
+        # many minutes) — see Pace5000Backend.wait_for_pressure(). The
+        # _pressure_* signals marshal results back onto this QObject's own
+        # thread (the GUI main thread), per the project convention that UI
+        # state must only be touched from the main thread.
+        self._pressure_thread: threading.Thread | None = None
+        self._pressure_stop_event = threading.Event()
+        self._pressure_progress.connect(self._on_pressure_progress)
+        self._pressure_reached.connect(self._on_pressure_reached)
+        self._pressure_wait_error.connect(self._on_pressure_wait_error)
 
     def start(self):
         self._running = True
         self.current_index = 0
-        self._waiting_for_pressure = False
-        self._latest_pressure = None
-        self.backend.pressure_updated.connect(self._on_pressure_update)
         self._tick_timer.start()
         self._execute_current()
 
@@ -149,25 +196,15 @@ class ScheduledControlRunner(QObject):
         self._running = False
         self._wait_timer.stop()
         self._tick_timer.stop()
-        self._disconnect_pressure()
+        self._pressure_stop_event.set()
         self.status_changed.emit("Status: Stopped")
         self.stopped.emit()
-
-    def _disconnect_pressure(self):
-        try:
-            self.backend.pressure_updated.disconnect(self._on_pressure_update)
-        except Exception:
-            pass
-
-    def _on_pressure_update(self, pressure: float):
-        self._latest_pressure = pressure
 
     def _execute_current(self):
         if not self._running:
             return
         if self.current_index >= len(self.items):
             self._tick_timer.stop()
-            self._disconnect_pressure()
             self.status_changed.emit("Status: Complete ✓")
             self.completed.emit()
             return
@@ -178,7 +215,6 @@ class ScheduledControlRunner(QObject):
         self.item_activated.emit(self.current_index)
 
         if item["type"] == "wait":
-            self._waiting_for_pressure = False
             self._wait_duration = item["duration"]
             self._wait_start    = time.time()
             self._wait_timer.start(int(self._wait_duration * 1000))
@@ -187,35 +223,94 @@ class ScheduledControlRunner(QObject):
             )
 
         elif item["type"] == "change_pressure":
-            scpi_unit    = self._UNIT_SCPI.get(item["pressure_unit"], "BAR")
-            rate_per_sec = item["rate"] / 60.0 if "/min" in item["rate_unit"] else item["rate"]
+            self._start_change_pressure(item, n, total)
 
-            self.backend.write(f":UNIT:PRES {scpi_unit}")
+    def _start_change_pressure(self, item: dict, n: int, total: int):
+        # set_pressure_with_ramp() / wait_for_pressure() are the single
+        # shared implementation (apps/PACE5000/pace5000_backend.py), also
+        # used by apps/exp_scheduler and the HTTP API. In particular,
+        # set_pressure_with_ramp() sends the slew rate and verifies the
+        # device applied it *before* sending the setpoint — sending them in
+        # the other order (or without verifying) risks the new setpoint
+        # being approached at whatever rate was previously in effect.
+        pressure_mpa = item["pressure"] * PRESSURE_UNIT_TO_MPA.get(item["pressure_unit"], 1.0)
+        rate_mpa_per_min = item["rate"] * RATE_UNIT_TO_MPA_PER_MIN.get(item["rate_unit"], 1.0)
 
-            latest = self._latest_pressure
-            if latest is not None and rate_per_sec > 0:
-                current_in_new = self._convert_pressure(
-                    latest, self._device_scpi_unit, scpi_unit
-                )
-                delta = abs(item["pressure"] - current_in_new)
-                self._pressure_eta = time.time() + delta / rate_per_sec
-            else:
-                self._pressure_eta = None
+        before = self.backend.get_pressure()
+        if before is not None and rate_mpa_per_min > 0:
+            delta = abs(pressure_mpa - before)
+            self._pressure_eta = time.time() + delta / (rate_mpa_per_min / 60.0)
+        else:
+            self._pressure_eta = None
+        self._eta_warning_sent = False
 
-            self._device_scpi_unit = scpi_unit
+        self._target_pressure_mpa = pressure_mpa
+        self._target_display_str  = f"{item['pressure']:.4g} {item['pressure_unit']}"
 
-            self.backend.write(f":SOUR:PRES:SLEW {rate_per_sec:.6f}")
-            self.backend.write(f":SOUR:PRES {item['pressure']:.6f}")
+        try:
+            self.backend.set_pressure_with_ramp(pressure_mpa, rate_mpa_per_min)
+        except RuntimeError as e:
+            self.error_occurred.emit(f"Scheduled Control: {e}")
+            self.stop()
+            return
 
-            self._target_pressure    = item["pressure"]
-            self._target_display_str = f"{item['pressure']:.4g} {item['pressure_unit']}"
-            self._target_scpi_unit   = scpi_unit
-            self._waiting_for_pressure = True
-            self._eta_warning_sent     = False
+        self.status_changed.emit(
+            f"Running [{n}/{total}]: Pressure → {self._target_display_str} (monitoring...)"
+        )
 
-            self.status_changed.emit(
-                f"Running [{n}/{total}]: Pressure → {self._target_display_str} (monitoring...)"
+        self._pressure_stop_event.clear()
+        self._pressure_thread = threading.Thread(
+            target=self._wait_pressure_worker, daemon=True,
+        )
+        self._pressure_thread.start()
+
+    def _wait_pressure_worker(self):
+        """Runs on a background thread — must not touch UI/self.view state."""
+        try:
+            result = self.backend.wait_for_pressure(
+                self._DEFAULT_PRESSURE_TOL_MPA,
+                stop_event=self._pressure_stop_event,
+                on_update=lambda cur, tgt: self._pressure_progress.emit(cur, tgt),
             )
+        except Exception as e:
+            self._pressure_wait_error.emit(str(e))
+            return
+        if result is None:
+            return  # cancelled via stop() — stop() already emitted `stopped`
+        self._pressure_reached.emit()
+
+    def _on_pressure_progress(self, current_mpa: float, target_mpa: float):
+        if not self._running:
+            return
+        n, total = self.current_index + 1, len(self.items)
+        current_disp = f"{current_mpa:.4g} MPa"
+        warning_str  = ""
+        now = time.time()
+        if self._pressure_eta and now > self._pressure_eta + self._ETA_WARNING_SEC:
+            delay_min = (now - self._pressure_eta) / 60.0
+            warning_str = f"  ⚠ ETA exceeded by {delay_min:.1f} min"
+            if not self._eta_warning_sent:
+                self._eta_warning_sent = True
+                self.pressure_warning.emit(
+                    f"⚠  Pressure has not reached target {self._target_display_str} — "
+                        f"{delay_min:.1f} min past the estimated arrival time.\n"
+                        f"The sequence continues monitoring. Press Stop to abort."
+                )
+        self.status_changed.emit(
+            f"Running [{n}/{total}]: Pressure → {self._target_display_str}  (current: {current_disp}){warning_str}"
+        )
+
+    def _on_pressure_reached(self):
+        if not self._running:
+            return
+        self.current_index += 1
+        self._execute_current()
+
+    def _on_pressure_wait_error(self, msg: str):
+        if not self._running:
+            return
+        self.error_occurred.emit(f"Scheduled Control: {msg}")
+        self.stop()
 
     def _on_wait_done(self):
         self.current_index += 1
@@ -235,58 +330,22 @@ class ScheduledControlRunner(QObject):
                 f"Running [{n}/{total}]: Wait — {remaining:.1f} s remaining"
             )
 
-        elif item["type"] == "change_pressure" and self._waiting_for_pressure:
-            pressure = self._latest_pressure
-            if pressure is None:
-                return
-
-            target = self._target_pressure
-            tol    = self._PRESSURE_TOL.get(self._target_scpi_unit, 0.02)
-
-            if abs(pressure - target) <= tol:
-                self._waiting_for_pressure = False
-                self.current_index += 1
-                self._execute_current()
-                return
-
-            current_disp = f"{pressure:.4g} {item['pressure_unit']}"
-            warning_str  = ""
-            now = time.time()
-            if self._pressure_eta and now > self._pressure_eta + self._ETA_WARNING_SEC:
-                delay_min = (now - self._pressure_eta) / 60.0
-                warning_str = f"  ⚠ ETA exceeded by {delay_min:.1f} min"
-                if not self._eta_warning_sent:
-                    self._eta_warning_sent = True
-                    self.pressure_warning.emit(
-                        f"⚠  Pressure has not reached target {self._target_display_str} — "
-                            f"{delay_min:.1f} min past the estimated arrival time.\n"
-                            f"The sequence continues monitoring. Press Stop to abort."
-                    )
-
-            self.status_changed.emit(
-                f"Running [{n}/{total}]: Pressure → {self._target_display_str}  (current: {current_disp}){warning_str}"
-            )
-
-    @staticmethod
-    def _convert_pressure(value: float, from_scpi: str, to_scpi: str) -> float:
-        if from_scpi == to_scpi:
-            return value
-        if from_scpi == "BAR" and to_scpi == "MPA":
-            return value / 10.0
-        if from_scpi == "MPA" and to_scpi == "BAR":
-            return value * 10.0
-        return value
-
 
 # ==============================================================
 # App Controller
 # ==============================================================
 
 class AppController:
-    def __init__(self, view: PaceUI, backend: Pace5000Backend = None):
+    def __init__(self, view: PaceUI, backend: Pace5000Backend = None, api_cli: dict | None = None):
         self.view    = view
         self._runner = None
         self._owns_backend = backend is None
+
+        # HTTP API server — standalone-only (see api_group visibility below).
+        # api_cli, when given, comes from CLI flags (--api/--api-host/...) and
+        # auto-starts the server once the device connection succeeds.
+        self.api_server: Pace5000ApiServer | None = None
+        self._api_cli = api_cli if self._owns_backend else None
 
         self.time_data:     deque = deque()
         self.pressure_data: deque = deque()
@@ -311,10 +370,13 @@ class AppController:
         self._schedule_items: list = []
         self._edit_index     = None
         self._logging_unit   = "MPa"
+        self._rate_time_unit = "sec"
         self._sched_plot_window: SchedulePlotWindow | None = None
         self._last_target_str = ""
         self._positive_source: float | None = None
         self._negative_source: float | None = None
+        self._live_target_native: float | None = None
+        self._live_slew_native_per_sec: float | None = None
 
         if backend is not None:
             # Connection managed by the launcher — wire signals and hide connection UI
@@ -322,6 +384,7 @@ class AppController:
             backend.connection_status_changed.connect(self.handle_connection_status)
             backend.pressure_updated.connect(self.update_plot)
             backend.source_pressures_updated.connect(self.update_source_pressures)
+            backend.setpoint_updated.connect(self._on_setpoint_updated)
             backend.error_occurred.connect(self.handle_error)
             self.view.conn_group.setVisible(False)
             self.handle_connection_status(True)
@@ -345,6 +408,7 @@ class AppController:
         self.view.radio_control.toggled.connect(self._on_mode_radio_changed)
         self.view.radio_measure.toggled.connect(self._on_mode_radio_changed)
         self.view.target_input.returnPressed.connect(self.update_target)
+        self.view.target_input.textEdited.connect(self._on_target_input_edited)
         self.view.radio_unit_mpa.toggled.connect(
             lambda checked: checked and self._on_target_pressure_unit_changed("MPa")
         )
@@ -352,6 +416,8 @@ class AppController:
             lambda checked: checked and self._on_target_pressure_unit_changed("Bar")
         )
         self.view.rate_input.returnPressed.connect(self.update_rate)
+        self.view.rate_input.textEdited.connect(self._on_rate_input_edited)
+        self.view.rate_time_combo.currentTextChanged.connect(self._on_rate_time_unit_changed)
         self.view.btn_rel_minus.clicked.connect(lambda: self._apply_relative_change(-1))
         self.view.btn_rel_plus.clicked.connect(lambda: self._apply_relative_change(1))
         self.view.btn_log_start.clicked.connect(self.start_logging)
@@ -375,12 +441,22 @@ class AppController:
         self.view.btn_sched_start.clicked.connect(self.sched_start)
         self.view.btn_sched_stop.clicked.connect(self.sched_stop)
 
+        self.view.api_enable_cb.toggled.connect(self._on_api_toggled)
+        self.view.btn_api_regenerate.clicked.connect(self._on_api_regenerate)
+        self.view.btn_api_copy.clicked.connect(self._on_api_copy)
+
     def _apply_settings(self, s: dict):
         self.view.conn_type_combo.setCurrentIndex(s["connection_type"])
         self.view.ip_input.setText(s["ip_address"])
         self.view.port_input.setText(s["port"])
         self.view.com_port_input.setText(s["com_port"])
         self.view.baudrate_input.setText(s["baudrate"])
+        self.view.api_host_input.setText(s.get("api_host", "127.0.0.1"))
+        try:
+            self.view.api_port_spin.setValue(int(s.get("api_port", 8765)))
+        except (TypeError, ValueError):
+            pass
+        self.view.api_key_input.setText(s.get("api_key", ""))
 
     # ----------------------------------------------------------
     def connect_device(self):
@@ -415,11 +491,13 @@ class AppController:
         self.backend.connection_status_changed.connect(self.handle_connection_status)
         self.backend.pressure_updated.connect(self.update_plot)
         self.backend.source_pressures_updated.connect(self.update_source_pressures)
+        self.backend.setpoint_updated.connect(self._on_setpoint_updated)
         self.backend.error_occurred.connect(self.handle_error)
         self.view.status_label.setText("Status: Connecting...")
         self.backend.connect_device()
 
     def disconnect_device(self):
+        self._stop_api_server()
         if self._logging_active:
             self.stop_logging()
         if self._runner:
@@ -429,6 +507,72 @@ class AppController:
             self.backend.stop()
             self.backend = None
 
+    # ---------------------------------------------------------- API server
+    # Standalone-only (api_group is hidden entirely in embedded mode, and
+    # api_enable_cb only becomes enabled once connected — see
+    # handle_connection_status below).
+
+    def _start_api_server(self, host: str, port: int, key: str | None) -> bool:
+        try:
+            self.api_server = Pace5000ApiServer(self.backend, host=host, port=port, api_key=key or None)
+            self.api_server.start()
+        except (ValueError, OSError) as e:
+            QMessageBox.critical(self.view, "API Server Error", str(e))
+            self.api_server = None
+            return False
+        _save_settings({**_load_settings(), "api_host": host, "api_port": str(port), "api_key": key or ""})
+        self.view.api_host_input.setText(host)
+        self.view.api_port_spin.setValue(port)
+        self.view.api_key_input.setText(key or "")
+        self.view.api_status_label.setText(f"Running: {self.api_server.listen_url}")
+        self.view.api_status_label.setStyleSheet("color: green; font-weight: bold;")
+        self.view.api_host_input.setEnabled(False)
+        self.view.api_port_spin.setEnabled(False)
+        self.view.btn_api_regenerate.setEnabled(False)
+        self._set_control_tabs_enabled(False)
+        return True
+
+    def _stop_api_server(self):
+        if self.api_server is not None:
+            self.api_server.stop()
+            self.api_server = None
+        self.view.api_status_label.setText("Stopped")
+        self.view.api_status_label.setStyleSheet("color: gray; font-weight: bold;")
+        self.view.api_host_input.setEnabled(True)
+        self.view.api_port_spin.setEnabled(True)
+        self.view.btn_api_regenerate.setEnabled(True)
+        self.view.api_enable_cb.blockSignals(True)
+        self.view.api_enable_cb.setChecked(False)
+        self.view.api_enable_cb.blockSignals(False)
+        self._set_control_tabs_enabled(True)
+
+    def _set_control_tabs_enabled(self, enabled: bool):
+        # While the HTTP API is enabled, the device can be driven from another
+        # process at any time — Manual Control and Scheduled Control must not
+        # race against that, so both tabs are locked out entirely.
+        self.view.tabs.setTabEnabled(0, enabled)
+        self.view.tabs.setTabEnabled(1, enabled)
+
+    def _on_api_toggled(self, checked: bool):
+        if checked:
+            host = self.view.api_host_input.text().strip() or "127.0.0.1"
+            port = self.view.api_port_spin.value()
+            key  = self.view.api_key_input.text().strip()
+            if not self._start_api_server(host, port, key or None):
+                self.view.api_enable_cb.blockSignals(True)
+                self.view.api_enable_cb.setChecked(False)
+                self.view.api_enable_cb.blockSignals(False)
+        else:
+            self._stop_api_server()
+
+    def _on_api_regenerate(self):
+        key = generate_api_key()
+        self.view.api_key_input.setText(key)
+        _save_settings({**_load_settings(), "api_key": key})
+
+    def _on_api_copy(self):
+        QApplication.clipboard().setText(self.view.api_key_input.text())
+
     # ----------------------------------------------------------
     def handle_connection_status(self, connected: bool):
         if connected:
@@ -437,19 +581,33 @@ class AppController:
             self.view.btn_connect.setEnabled(False)
             self.view.btn_disconnect.setEnabled(True)
             self.view.btn_log_start.setEnabled(True)
+            self.view.api_enable_cb.setEnabled(True)
             interval_ms = int(self.view.interval_spinbox.value() * 1000)
             self.backend.timer.setInterval(interval_ms)
             QTimer.singleShot(100, self._do_initial_fetch)
+            if self._api_cli is not None and self.api_server is None:
+                host = self._api_cli.get("host") or self.view.api_host_input.text().strip() or "127.0.0.1"
+                port = self._api_cli.get("port") or self.view.api_port_spin.value()
+                key = self._api_cli.get("key") or self.view.api_key_input.text().strip() or None
+                if self._start_api_server(host, port, key):
+                    self.view.api_enable_cb.blockSignals(True)
+                    self.view.api_enable_cb.setChecked(True)
+                    self.view.api_enable_cb.blockSignals(False)
         else:
             self.view.status_label.setText("Status: Disconnected")
             self.view.status_label.setStyleSheet("color: red; font-weight: bold;")
             self.view.source_pressure_label.setText("−ve source:  ---    +ve source:  ---")
+            self.view.setpoint_live_label.setText("Target Pressure:  ---    Slew Rate:  ---")
             self._positive_source = None
             self._negative_source = None
+            self._live_target_native = None
+            self._live_slew_native_per_sec = None
             self.view.btn_connect.setEnabled(True)
             self.view.btn_disconnect.setEnabled(False)
             self.view.btn_log_start.setEnabled(False)
             self.view.btn_log_stop.setEnabled(False)
+            self.view.api_enable_cb.setEnabled(False)
+            self._stop_api_server()
             if self._runner:
                 self._runner.stop()
                 self._runner = None
@@ -645,6 +803,7 @@ class AppController:
                     f"Target has not been updated."
             )
             self.view.target_input.setText(self._last_target_str)
+            self.view.target_input.setStyleSheet("")
             return
         if self.view.chk_confirm_before_apply.isChecked():
             msg = f"Go to {val} {unit} at {rate_val} {rate_unit}?"
@@ -658,7 +817,7 @@ class AppController:
         self.backend.write(f":UNIT:PRES {scpi_unit}")
         self.backend.set_target_pressure(val)
         self._last_target_str = self.view.target_input.text()
-        self.view.target_input.setStyleSheet("background-color: #e6ffe6;")
+        self.view.target_input.setStyleSheet("")
         QMessageBox.information(self.view, "Success", f"Target updated to: {val} {unit}")
 
     def update_rate(self):
@@ -670,11 +829,20 @@ class AppController:
             pressure_unit = self.view.get_pressure_unit()
             time_unit = self.view.rate_time_combo.currentText()
             unit = f"{pressure_unit}/{time_unit}"
-            self.backend.set_slew_rate(val, unit)
-            self.view.rate_input.setStyleSheet("background-color: #e6ffe6;")
-            QMessageBox.information(self.view, "Success", f"Rate updated to: {val} {unit}")
         except ValueError:
             QMessageBox.warning(self.view, "Error", "Invalid rate value. Numbers only.")
+            return
+        if rate_to_mpa_per_sec(val, unit) < MIN_SLEW_RATE_MPA_PER_SEC:
+            QMessageBox.warning(
+                self.view, "Error",
+                f"Slew rate is below the minimum allowed "
+                    f"({MIN_SLEW_RATE_MPA_PER_SEC:.3f} MPa/sec).\n"
+                    f"Entered value: {val:.4g} {unit}."
+            )
+            return
+        self.backend.set_slew_rate(val, unit)
+        self.view.rate_input.setStyleSheet("")
+        QMessageBox.information(self.view, "Success", f"Rate updated to: {val} {unit}")
 
     def _apply_relative_change(self, sign: int):
         if not self.backend or not self.backend._is_connected:
@@ -705,7 +873,7 @@ class AppController:
         self.backend.set_target_pressure(new_val)
         self._last_target_str = f"{new_val:.4g}"
         self.view.target_input.setText(f"{new_val:.4g}")
-        self.view.target_input.setStyleSheet("background-color: #e6ffe6;")
+        self.view.target_input.setStyleSheet("")
 
     # ----------------------------------------------------------
     def _do_initial_fetch(self):
@@ -717,7 +885,14 @@ class AppController:
         setpoint = self.backend.get_target_pressure()
         if setpoint is not None:
             self.view.target_input.setText(setpoint)
+            self.view.target_input.setStyleSheet("")
             self._last_target_str = setpoint
+        slew_raw = self.backend.get_slew_rate()
+        if setpoint is not None and slew_raw is not None:
+            try:
+                self._on_setpoint_updated(float(setpoint), float(slew_raw))
+            except ValueError:
+                pass
         output_state = self.backend.get_output_state()
         if output_state is not None:
             is_control = output_state.strip() in ("1", "ON")
@@ -732,6 +907,38 @@ class AppController:
         if pos is not None and neg is not None:
             self.update_source_pressures(pos, neg)
 
+    def _on_target_input_edited(self, _text: str):
+        self.view.target_input.setStyleSheet("background-color: #e6ffe6;")
+
+    def _on_rate_input_edited(self, _text: str):
+        self.view.rate_input.setStyleSheet("background-color: #e6ffe6;")
+
+    def _on_setpoint_updated(self, target_native: float, slew_native_per_sec: float):
+        self._live_target_native = target_native
+        self._live_slew_native_per_sec = slew_native_per_sec
+        self._render_live_setpoints()
+
+    def _render_live_setpoints(self):
+        if self._live_target_native is None or self._live_slew_native_per_sec is None:
+            return
+        unit = self.view.get_pressure_unit()
+        time_unit = self.view.rate_time_combo.currentText()
+        slew_val = self._live_slew_native_per_sec * (60.0 if time_unit == "min" else 1.0)
+        self.view.setpoint_live_label.setText(
+            f"Target Pressure:  {self._live_target_native:.4g} {unit}    "
+                f"Slew Rate:  {slew_val:.4g} {unit}/{time_unit}"
+        )
+
+    def _convert_line_edit_value(self, line_edit, factor: float):
+        text = line_edit.text().strip()
+        if not text:
+            return
+        try:
+            val = float(text)
+        except ValueError:
+            return
+        line_edit.setText(_format_num(val * factor))
+
     def _on_target_pressure_unit_changed(self, unit: str):
         self.view.rate_pressure_unit_display.setText(unit)
         self.view.plot_widget.setLabel("left", f"Pressure ({unit})")
@@ -740,14 +947,29 @@ class AppController:
             self.backend.write(f":UNIT:PRES {scpi_unit}")
         old_unit = self._logging_unit
         if old_unit != unit:
-            factor = 10.0 if (old_unit == "MPa" and unit == "Bar") else 0.1
+            factor = PRESSURE_UNIT_TO_MPA[old_unit] / PRESSURE_UNIT_TO_MPA[unit]
             self.pressure_data = deque(p * factor for p in self.pressure_data)
             if self.pressure_data:
                 self.view.plot_curve.setData(
                     [(v - self.time_data[0]) for v in self.time_data],
                     list(self.pressure_data),
                 )
+            self._convert_line_edit_value(self.view.target_input, factor)
+            self._convert_line_edit_value(self.view.rate_input, factor)
+            if self._live_target_native is not None:
+                self._live_target_native *= factor
+            if self._live_slew_native_per_sec is not None:
+                self._live_slew_native_per_sec *= factor
             self._logging_unit = unit
+        self._render_live_setpoints()
+
+    def _on_rate_time_unit_changed(self, new_time_unit: str):
+        old_time_unit = self._rate_time_unit
+        if old_time_unit != new_time_unit:
+            factor = 60.0 if (old_time_unit == "sec" and new_time_unit == "min") else (1.0 / 60.0)
+            self._convert_line_edit_value(self.view.rate_input, factor)
+            self._rate_time_unit = new_time_unit
+        self._render_live_setpoints()
 
     def _on_sched_type_changed(self, index: int):
         self.view.sched_param_stack.setCurrentIndex(index)
@@ -823,12 +1045,21 @@ class AppController:
             except ValueError:
                 QMessageBox.warning(self.view, "Error", "Please enter valid numbers for pressure and rate.")
                 return
+            rate_unit = self.view.sched_rate_unit.currentText()
+            if rate_to_mpa_per_sec(rate, rate_unit) < MIN_SLEW_RATE_MPA_PER_SEC:
+                QMessageBox.warning(
+                    self.view, "Error",
+                    f"Slew rate is below the minimum allowed "
+                        f"({MIN_SLEW_RATE_MPA_PER_SEC:.3f} MPa/sec).\n"
+                        f"Entered value: {rate:.4g} {rate_unit}."
+                )
+                return
             new_item = {
                 "type":          "change_pressure",
                 "pressure":      pressure,
                 "pressure_unit": self.view.sched_pressure_unit.currentText(),
                 "rate":          rate,
-                "rate_unit":     self.view.sched_rate_unit.currentText(),
+                "rate_unit":     rate_unit,
             }
 
         if self._edit_index is not None:
@@ -1005,6 +1236,7 @@ class AppController:
         self._runner.status_changed.connect(self._on_sched_status)
         self._runner.item_activated.connect(self.view.sched_list.setCurrentRow)
         self._runner.pressure_warning.connect(self._on_sched_warning)
+        self._runner.error_occurred.connect(self._on_sched_error)
         self._runner.completed.connect(self._on_sched_completed)
         self._runner.stopped.connect(self._on_sched_stopped)
 
@@ -1034,6 +1266,9 @@ class AppController:
     def _on_sched_warning(self, msg: str):
         self.view.sched_warning_label.setText(msg)
         self.view.sched_warning_label.setVisible(True)
+
+    def _on_sched_error(self, msg: str):
+        QMessageBox.critical(self.view, "Scheduled Control Error", msg)
 
     def _on_sched_completed(self):
         self._finish_schedule(completed=True)
@@ -1097,26 +1332,37 @@ class Pace5000Window(QMainWindow):
     When omitted the window handles its own connection via the UI.
     """
 
-    def __init__(self, backend: Pace5000Backend = None):
+    def __init__(self, backend: Pace5000Backend = None, api_cli: dict | None = None):
         super().__init__()
         self.setWindowTitle("Druck PACE5000 Controller")
         view = PaceUI()
-        self._controller = AppController(view, backend=backend)
+        self._controller = AppController(view, backend=backend, api_cli=api_cli)
         self.setCentralWidget(view)
         self.resize(920, 800)
+        self._api_config_window: ApiConfigWindow | None = None
+        self._setup_api_menu()
+
+    def _setup_api_menu(self):
+        api_menu = self.menuBar().addMenu("API")
+        configure_action = api_menu.addAction("Configure and start API")
+        configure_action.triggered.connect(self._open_api_config_window)
+        if not self._controller._owns_backend:
+            # API server is standalone-only — hide the menu entirely when the
+            # connection is managed externally (embedded mode, e.g. main.py).
+            api_menu.menuAction().setVisible(False)
+
+    def _open_api_config_window(self):
+        if self._api_config_window is None:
+            self._api_config_window = ApiConfigWindow(self._controller.view.api_group, self)
+        self._api_config_window.show()
+        self._api_config_window.raise_()
+        self._api_config_window.activateWindow()
 
     def closeEvent(self, event):
         self._controller.disconnect_device()
         event.accept()
 
 
-# ==============================================================
-# Standalone entry point
-# ==============================================================
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    window = Pace5000Window()
-    window.show()
-    sys.exit(app.exec())
+# The standalone launcher (argparse + QApplication + event loop) lives in
+# apps/PACE5000/app.py — run that file directly, not this one. See the
+# module docstring-equivalent comment at the top of this file for why.
