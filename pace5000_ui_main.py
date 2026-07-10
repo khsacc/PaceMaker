@@ -22,7 +22,7 @@ class PaceUI(QWidget):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("Druck PACE5000 Controller")
+        self.setWindowTitle("PaceMaker: Druck PACE5000 Controller")
         self.resize(920, 800)
         main_layout = QVBoxLayout(self)
 
@@ -82,7 +82,7 @@ class PaceUI(QWidget):
         # of the way for the majority of users who don't need it. Hidden
         # entirely (the whole "API" menu) when the backend is managed
         # externally (embedded mode, e.g. main.py).
-        self.api_group = QGroupBox("API Server")
+        self.api_group = QGroupBox("PACE5000 API Server")
         api_layout = QHBoxLayout()
 
         self.api_enable_cb = QCheckBox("Enable")
