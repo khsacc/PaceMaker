@@ -1,9 +1,9 @@
 """
 PACE5000 HTTP API — optional network control/monitoring layer.
 
-Only meant to be enabled when pace5000_app.py is run standalone (see
-Pace5000ApiServer usage in pace5000_app.py's AppController). Not wired into
-the embedded (main.py-launched) code path.
+Only meant to be enabled when the app is run standalone via
+apps/PACE5000/app.py (see Pace5000ApiServer usage in pace5000_app.py's
+AppController). Not wired into the embedded (main.py-launched) code path.
 
 Implemented with the standard library only (http.server) — no new
 dependency beyond what this app already requires (PyQt6, pyqtgraph,
@@ -25,10 +25,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-try:
-    from .pace5000_backend import Pace5000Backend, PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN
-except ImportError:
-    from pace5000_backend import Pace5000Backend, PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN
+from .pace5000_backend import Pace5000Backend, PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN
 
 API_PREFIX = "/api/v1"
 MAX_WAIT_TIMEOUT_S = 300  # cap for /pressure/wait — avoid holding a connection open indefinitely

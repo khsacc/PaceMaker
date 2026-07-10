@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import argparse
 import os
-import sys
 import csv
 import json
 import threading
@@ -17,25 +15,21 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, Qt
 import pyqtgraph as pg
 
-try:
-    from .pace5000_ui_main import PaceUI
-    from .pace5000_backend import (
-        Pace5000Backend, PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN,
-        MIN_SLEW_RATE_MPA_PER_SEC, rate_to_mpa_per_sec,
-    )
-    from .pace5000_api import Pace5000ApiServer, generate_api_key
-except ImportError:
-    # Standalone execution (no parent package) — make this directory's own
-    # modules importable by their bare names.
-    _dir = os.path.dirname(os.path.abspath(__file__))
-    if _dir not in sys.path:
-        sys.path.insert(0, _dir)
-    from pace5000_ui_main import PaceUI
-    from pace5000_backend import (
-        Pace5000Backend, PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN,
-        MIN_SLEW_RATE_MPA_PER_SEC, rate_to_mpa_per_sec,
-    )
-    from pace5000_api import Pace5000ApiServer, generate_api_key
+# This module is only ever imported as part of the `apps.PACE5000` package —
+# either by main.py (embedded mode) or by apps/PACE5000/app.py (the
+# standalone launcher, which puts the project root on sys.path before
+# importing this module by its fully-qualified name). It must never be run
+# directly nor imported via a bare/sys.path-hacked fallback: doing so would
+# risk this file being loaded twice under two different module identities
+# (once as `apps.PACE5000.pace5000_app`, once as a bare `pace5000_app`),
+# which silently duplicates classes and breaks isinstance()/signal wiring
+# across the two copies. Always use plain relative imports here.
+from .pace5000_ui_main import PaceUI
+from .pace5000_backend import (
+    Pace5000Backend, PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN,
+    MIN_SLEW_RATE_MPA_PER_SEC, rate_to_mpa_per_sec,
+)
+from .pace5000_api import Pace5000ApiServer, generate_api_key
 
 
 def _format_num(value: float) -> str:
@@ -1365,25 +1359,6 @@ class Pace5000Window(QMainWindow):
         event.accept()
 
 
-# ==============================================================
-# Standalone entry point
-# ==============================================================
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PACE5000 standalone controller")
-    parser.add_argument("--api", action="store_true",
-                         help="Auto-start the HTTP API server once the device connection succeeds")
-    parser.add_argument("--api-host", default=None,
-                         help="API server bind host (default: saved setting, else 127.0.0.1)")
-    parser.add_argument("--api-port", type=int, default=None,
-                         help="API server bind port (default: saved setting, else 8765)")
-    parser.add_argument("--api-key", default=None,
-                         help="API key (required when --api-host is not loopback)")
-    args, qt_args = parser.parse_known_args()
-
-    app = QApplication([sys.argv[0]] + qt_args)
-    app.setStyle("Fusion")
-    api_cli = {"host": args.api_host, "port": args.api_port, "key": args.api_key} if args.api else None
-    window = Pace5000Window(api_cli=api_cli)
-    window.show()
-    sys.exit(app.exec())
+# The standalone launcher (argparse + QApplication + event loop) lives in
+# apps/PACE5000/app.py — run that file directly, not this one. See the
+# module docstring-equivalent comment at the top of this file for why.

@@ -26,19 +26,23 @@ pip install PyQt6 pyqtgraph pyserial
 
 ## Usage
 
+Run from the `bl18c_controller` project root:
+
 ```
-python pace5000_app.py
+python apps/PACE5000/app.py
 ```
+
+`app.py` is the only supported standalone entry point — it puts the project root on `sys.path` and imports the rest of this app (`pace5000_app.py`, `pace5000_ui_main.py`, `pace5000_backend.py`, `pace5000_api.py`) by its fully-qualified package name, so it can also be embedded in a larger launcher (see `bl18c_controller/main.py`) without any duplicate-import surprises.
 
 Connection settings (IP, port, COM port, baud rate) are saved automatically to `pace5000_settings.json`.
 The last-used log save directory is also persisted in `pace5000_settings.json` and restored as the default on next launch.
 
 ## API
 
-Only available when running `pace5000_app.py` standalone (not when this app is embedded in another launcher). Open **API → Configure and start API** from the menu bar once connected and enable it there, or auto-start it with `--api` on the command line:
+Only available when running `app.py` standalone (not when this app is embedded in another launcher). Open **API → Configure and start API** from the menu bar once connected and enable it there, or auto-start it with `--api` on the command line:
 
 ```
-python pace5000_app.py --api --api-host 0.0.0.0 --api-port 8765 --api-key <key>
+python apps/PACE5000/app.py --api --api-host 0.0.0.0 --api-port 8765 --api-key <key>
 ```
 
 **Authentication**: binding to `127.0.0.1` (the default) requires no API key — only processes on the same machine can reach it. Binding to any other host (e.g. `0.0.0.0` or a specific LAN IP, to allow other machines on the network to reach it) requires an API key, sent as the `X-API-Key` header on every request. Generate one from the UI ("Regenerate") or pass `--api-key`; it is persisted in `pace5000_settings.json` so it stays stable across restarts.
