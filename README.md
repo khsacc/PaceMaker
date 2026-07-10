@@ -26,13 +26,13 @@ pip install PyQt6 pyqtgraph pyserial
 
 ## Usage
 
-Run from the `bl18c_controller` project root:
+`app.py` is the only supported standalone entry point:
 
 ```
-python apps/PACE5000/app.py
+python app.py
 ```
 
-`app.py` is the only supported standalone entry point — it puts the project root on `sys.path` and imports the rest of this app (`pace5000_app.py`, `pace5000_ui_main.py`, `pace5000_backend.py`, `pace5000_api.py`) by its fully-qualified package name, so it can also be embedded in a larger launcher (see `bl18c_controller/main.py`) without any duplicate-import surprises.
+This works whether this repository (PaceMaker) is cloned on its own, or checked out as the `apps/PACE5000/` submodule inside a larger project (e.g. `bl18c_controller`, run as `python apps/PACE5000/app.py` from that project's root) — `app.py` registers this directory as its own private package at runtime rather than assuming any particular parent directory structure, so `pace5000_app.py`, `pace5000_ui_main.py`, `pace5000_backend.py`, and `pace5000_api.py` always import each other consistently either way.
 
 Connection settings (IP, port, COM port, baud rate) are saved automatically to `pace5000_settings.json`.
 The last-used log save directory is also persisted in `pace5000_settings.json` and restored as the default on next launch.
@@ -42,7 +42,7 @@ The last-used log save directory is also persisted in `pace5000_settings.json` a
 Only available when running `app.py` standalone (not when this app is embedded in another launcher). Open **API → Configure and start API** from the menu bar once connected and enable it there, or auto-start it with `--api` on the command line:
 
 ```
-python apps/PACE5000/app.py --api --api-host 0.0.0.0 --api-port 8765 --api-key <key>
+python app.py --api --api-host 0.0.0.0 --api-port 8765 --api-key <key>
 ```
 
 **Authentication**: binding to `127.0.0.1` (the default) requires no API key — only processes on the same machine can reach it. Binding to any other host (e.g. `0.0.0.0` or a specific LAN IP, to allow other machines on the network to reach it) requires an API key, sent as the `X-API-Key` header on every request. Generate one from the UI ("Regenerate") or pass `--api-key`; it is persisted in `pace5000_settings.json` so it stays stable across restarts.

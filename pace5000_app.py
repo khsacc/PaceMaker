@@ -15,15 +15,19 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, Qt
 import pyqtgraph as pg
 
-# This module is only ever imported as part of the `apps.PACE5000` package —
-# either by main.py (embedded mode) or by apps/PACE5000/app.py (the
-# standalone launcher, which puts the project root on sys.path before
-# importing this module by its fully-qualified name). It must never be run
-# directly nor imported via a bare/sys.path-hacked fallback: doing so would
-# risk this file being loaded twice under two different module identities
-# (once as `apps.PACE5000.pace5000_app`, once as a bare `pace5000_app`),
-# which silently duplicates classes and breaks isinstance()/signal wiring
-# across the two copies. Always use plain relative imports here.
+# This module is only ever imported as part of a package — never run
+# directly, and never imported via a bare/sys.path-hacked fallback. Two
+# call sites do this:
+#   - main.py (embedded mode) imports it as `apps.PACE5000.pace5000_app`.
+#   - apps/PACE5000/app.py (the standalone launcher) registers this
+#     directory as an in-memory package under a private name and imports
+#     it as a submodule of that — this works whether or not apps/PACE5000/
+#     happens to sit inside an enclosing `apps` package, e.g. when this
+#     directory's own repository (PaceMaker) is git-cloned on its own.
+# Either way this module always has a real __package__, so relative imports
+# resolve correctly and these files are never loaded twice under two
+# different module identities in the same process. Always use plain
+# relative imports here.
 from .pace5000_ui_main import PaceUI
 from .pace5000_backend import (
     Pace5000Backend, PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN,
