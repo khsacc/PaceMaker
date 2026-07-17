@@ -139,6 +139,7 @@ class _Handler(BaseHTTPRequestHandler):
             "control_mode": backend.get_output_state(),
             "source_pressure_positive_mpa": backend.get_positive_source_pressure(),
             "source_pressure_negative_mpa": backend.get_negative_source_pressure(),
+            "effort_percent": backend.get_effort(),
         })
 
     def _handle_set_pressure(self, body: dict) -> None:
@@ -167,7 +168,7 @@ class _Handler(BaseHTTPRequestHandler):
         rate_mpa_per_min = rate * RATE_UNIT_TO_MPA_PER_MIN[rate_unit]
 
         try:
-            backend.set_pressure_with_ramp(pressure_mpa, rate_mpa_per_min)
+            backend.set_pressure_with_ramp(pressure_mpa, rate_mpa_per_min, unit="MPa")
         except RuntimeError as e:
             self._send_json(409, {"error": str(e)})
             return
@@ -210,6 +211,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._bad_request("timeout_s must be a number")
             return
         timeout_s = min(timeout_s, MAX_WAIT_TIMEOUT_S)
+        if timeout_s < Pace5000Backend.DEFAULT_STABILITY_DWELL_S:
+            self._bad_request(
+                f"timeout_s must be at least "
+                f"{Pace5000Backend.DEFAULT_STABILITY_DWELL_S} s — the pressure "
+                f"must stay within tol continuously for that long before "
+                f"being considered reached, so a shorter timeout could never "
+                f"succeed"
+            )
+            return
 
         tol_mpa = tol * PRESSURE_UNIT_TO_MPA[unit]
         try:

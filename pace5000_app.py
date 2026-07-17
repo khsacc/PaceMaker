@@ -336,6 +336,13 @@ class ScheduledControlRunner(QObject):
 # ==============================================================
 
 class AppController:
+    # Sustained-saturation warning thresholds for the Effort readout — same
+    # "edge-derived, recompute every tick" pattern as
+    # ScheduledControlRunner._ETA_WARNING_SEC, just for a continuously
+    # updated label rather than a one-shot popup.
+    _EFFORT_WARNING_THRESHOLD_PERCENT = 90.0
+    _EFFORT_WARNING_SUSTAINED_S = 30.0
+
     def __init__(self, view: PaceUI, backend: Pace5000Backend = None, api_cli: dict | None = None):
         self.view    = view
         self._runner = None
@@ -377,6 +384,8 @@ class AppController:
         self._negative_source: float | None = None
         self._live_target_native: float | None = None
         self._live_slew_native_per_sec: float | None = None
+        self._effort_saturated_since: float | None = None
+        self._instrument_full_scale_mpa: float | None = None
 
         if backend is not None:
             # Connection managed by the launcher — wire signals and hide connection UI
@@ -385,7 +394,9 @@ class AppController:
             backend.pressure_updated.connect(self.update_plot)
             backend.source_pressures_updated.connect(self.update_source_pressures)
             backend.setpoint_updated.connect(self._on_setpoint_updated)
+            backend.effort_updated.connect(self._on_effort_updated)
             backend.error_occurred.connect(self.handle_error)
+            backend.instrument_error_reported.connect(self.handle_instrument_error)
             self.view.conn_group.setVisible(False)
             self.handle_connection_status(True)
         else:
@@ -492,7 +503,9 @@ class AppController:
         self.backend.pressure_updated.connect(self.update_plot)
         self.backend.source_pressures_updated.connect(self.update_source_pressures)
         self.backend.setpoint_updated.connect(self._on_setpoint_updated)
+        self.backend.effort_updated.connect(self._on_effort_updated)
         self.backend.error_occurred.connect(self.handle_error)
+        self.backend.instrument_error_reported.connect(self.handle_instrument_error)
         self.view.status_label.setText("Status: Connecting...")
         self.backend.connect_device()
 
@@ -578,6 +591,8 @@ class AppController:
         if connected:
             self.view.status_label.setText("Status: Connected")
             self.view.status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.view.instrument_error_label.setText("Last Instrument Error: none")
+            self.view.instrument_error_label.setStyleSheet("color: gray; font-weight: bold;")
             self.view.btn_connect.setEnabled(False)
             self.view.btn_disconnect.setEnabled(True)
             self.view.btn_log_start.setEnabled(True)
@@ -598,10 +613,16 @@ class AppController:
             self.view.status_label.setStyleSheet("color: red; font-weight: bold;")
             self.view.source_pressure_label.setText("−ve source:  ---    +ve source:  ---")
             self.view.setpoint_live_label.setText("Target Pressure:  ---    Slew Rate:  ---")
+            self.view.effort_label.setText("Effort:  ---  %")
+            self.view.effort_status_label.setText("Effort: ---")
+            self.view.effort_status_label.setStyleSheet("color: gray; font-weight: bold;")
+            self.view.instrument_full_scale_label.setText("Instrument full-scale: ---")
             self._positive_source = None
             self._negative_source = None
             self._live_target_native = None
             self._live_slew_native_per_sec = None
+            self._effort_saturated_since = None
+            self._instrument_full_scale_mpa = None
             self.view.btn_connect.setEnabled(True)
             self.view.btn_disconnect.setEnabled(False)
             self.view.btn_log_start.setEnabled(False)
@@ -686,6 +707,39 @@ class AppController:
         self.view.source_pressure_label.setText(
             f"−ve source:  {negative:.4f}  {unit}    +ve source:  {positive:.4f}  {unit}"
         )
+
+    def _on_effort_updated(self, effort: float):
+        now = time.time()
+        saturated = abs(effort) >= self._EFFORT_WARNING_THRESHOLD_PERCENT
+        if not saturated:
+            self._effort_saturated_since = None
+        elif self._effort_saturated_since is None:
+            self._effort_saturated_since = now
+        sustained = (
+            saturated
+            and self._effort_saturated_since is not None
+            and now - self._effort_saturated_since >= self._EFFORT_WARNING_SUSTAINED_S
+        )
+
+        self.view.effort_label.setText(f"Effort:  {effort:.1f}  %")
+
+        if sustained:
+            cause = (
+                "supply valve maxed — check source pressure / slew rate"
+                if effort > 0 else
+                "vacuum valve maxed — check for leaks / blocked line"
+            )
+            elapsed = now - self._effort_saturated_since
+            self.view.effort_status_label.setText(
+                f"⚠ Effort saturated {elapsed:.0f}s: {effort:.1f}% ({cause})"
+            )
+            self.view.effort_status_label.setStyleSheet("color: #b00; font-weight: bold;")
+        elif saturated:
+            self.view.effort_status_label.setText(f"Effort: {effort:.1f}%")
+            self.view.effort_status_label.setStyleSheet("color: #b06a00; font-weight: bold;")
+        else:
+            self.view.effort_status_label.setText(f"Effort: {effort:.1f}%")
+            self.view.effort_status_label.setStyleSheet("color: gray; font-weight: bold;")
 
     # ----------------------------------------------------------
     def start_logging(self):
@@ -783,18 +837,63 @@ class AppController:
         if self.backend:
             self.backend.set_control_mode(is_control)
 
+    def _read_and_validate_rate(self) -> tuple[float, str, float] | None:
+        """Parse + validate the rate input field against the hardware floor.
+
+        Returns (rate_val, rate_unit, rate_per_min) in the operator's
+        currently selected pressure/time units, or None (after showing a
+        QMessageBox) if the field is invalid or below MIN_SLEW_RATE_MPA_PER_SEC.
+        """
+        try:
+            rate_val = float(self.view.rate_input.text())
+        except ValueError:
+            QMessageBox.warning(self.view, "Error", "Invalid rate value. Numbers only.")
+            return None
+        pressure_unit = self.view.get_pressure_unit()
+        time_unit = self.view.rate_time_combo.currentText()
+        rate_unit = f"{pressure_unit}/{time_unit}"
+        if rate_to_mpa_per_sec(rate_val, rate_unit) < MIN_SLEW_RATE_MPA_PER_SEC:
+            QMessageBox.warning(
+                self.view, "Error",
+                f"Slew rate is below the minimum allowed "
+                    f"({MIN_SLEW_RATE_MPA_PER_SEC:.3f} MPa/sec).\n"
+                    f"Entered value: {rate_val:.4g} {rate_unit}."
+            )
+            return None
+        rate_per_min = rate_val if time_unit == "min" else rate_val * 60.0
+        return rate_val, rate_unit, rate_per_min
+
+    def _read_max_safe_pressure_mpa(self) -> float | None:
+        """Parse the optional Max Safe Pressure field into MPa.
+
+        Returns None if left blank (no ceiling configured) — an unparseable
+        value is also treated as "no ceiling" since this is a soft,
+        user-editable safety aid, not a required field, and should never
+        block a pressure change with a confusing error of its own.
+        """
+        text = self.view.max_safe_pressure_input.text().strip()
+        if not text:
+            return None
+        try:
+            val = float(text)
+        except ValueError:
+            return None
+        return val * PRESSURE_UNIT_TO_MPA[self.view.get_pressure_unit()]
+
     def update_target(self):
         if not self.backend or not self.backend._is_connected:
             QMessageBox.warning(self.view, "Error", "Device not connected!")
             return
         try:
             val = float(self.view.target_input.text())
-            unit = self.view.get_pressure_unit()
-            rate_val = self.view.rate_input.text().strip()
-            rate_unit = f"{self.view.rate_pressure_unit_display.text()}/{self.view.rate_time_combo.currentText()}"
         except ValueError:
             QMessageBox.warning(self.view, "Error", "Invalid target pressure. Numbers only.")
             return
+        unit = self.view.get_pressure_unit()
+        rate_result = self._read_and_validate_rate()
+        if rate_result is None:
+            return
+        rate_val, rate_unit, rate_per_min = rate_result
         if self._positive_source is not None and val > self._positive_source:
             QMessageBox.warning(
                 self.view, "Target Exceeds +ve Source",
@@ -805,44 +904,55 @@ class AppController:
             self.view.target_input.setText(self._last_target_str)
             self.view.target_input.setStyleSheet("")
             return
+        max_safe_mpa = self._read_max_safe_pressure_mpa()
+        if max_safe_mpa is not None and val * PRESSURE_UNIT_TO_MPA[unit] > max_safe_mpa:
+            QMessageBox.warning(
+                self.view, "Target Exceeds Max Safe Pressure",
+                f"Set value ({val:.4g} {unit}) exceeds the configured Max Safe Pressure "
+                    f"({max_safe_mpa / PRESSURE_UNIT_TO_MPA[unit]:.4g} {unit}).\n"
+                    f"Target has not been updated."
+            )
+            self.view.target_input.setText(self._last_target_str)
+            self.view.target_input.setStyleSheet("")
+            return
         if self.view.chk_confirm_before_apply.isChecked():
-            msg = f"Go to {val} {unit} at {rate_val} {rate_unit}?"
+            msg = f"Go to {val} {unit} at {rate_val:.4g} {rate_unit}?"
             reply = QMessageBox.question(
                 self.view, "Confirm", msg,
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             )
             if reply != QMessageBox.StandardButton.Ok:
                 return
-        scpi_unit = "MPA" if unit == "MPa" else "BAR"
-        self.backend.write(f":UNIT:PRES {scpi_unit}")
-        self.backend.set_target_pressure(val)
+        # set_pressure_with_ramp() sends the slew rate and verifies the
+        # device applied it (read-back) *before* sending the setpoint —
+        # the same ordering guarantee Scheduled Control and exp_scheduler
+        # rely on, now unified into the manual "Apply" path too.
+        try:
+            self.backend.set_pressure_with_ramp(val, rate_per_min, unit=unit)
+        except RuntimeError as e:
+            QMessageBox.warning(self.view, "Error", str(e))
+            self.view.target_input.setText(self._last_target_str)
+            self.view.target_input.setStyleSheet("")
+            return
         self._last_target_str = self.view.target_input.text()
         self.view.target_input.setStyleSheet("")
-        QMessageBox.information(self.view, "Success", f"Target updated to: {val} {unit}")
+        self.view.rate_input.setStyleSheet("")
+        QMessageBox.information(
+            self.view, "Success",
+            f"Target updated to: {val} {unit} at {rate_val:.4g} {rate_unit} (rate verified).",
+        )
 
     def update_rate(self):
         if not self.backend or not self.backend._is_connected:
             QMessageBox.warning(self.view, "Error", "Device not connected!")
             return
-        try:
-            val = float(self.view.rate_input.text())
-            pressure_unit = self.view.get_pressure_unit()
-            time_unit = self.view.rate_time_combo.currentText()
-            unit = f"{pressure_unit}/{time_unit}"
-        except ValueError:
-            QMessageBox.warning(self.view, "Error", "Invalid rate value. Numbers only.")
+        rate_result = self._read_and_validate_rate()
+        if rate_result is None:
             return
-        if rate_to_mpa_per_sec(val, unit) < MIN_SLEW_RATE_MPA_PER_SEC:
-            QMessageBox.warning(
-                self.view, "Error",
-                f"Slew rate is below the minimum allowed "
-                    f"({MIN_SLEW_RATE_MPA_PER_SEC:.3f} MPa/sec).\n"
-                    f"Entered value: {val:.4g} {unit}."
-            )
-            return
-        self.backend.set_slew_rate(val, unit)
+        rate_val, rate_unit, _ = rate_result
+        self.backend.set_slew_rate(rate_val, rate_unit)
         self.view.rate_input.setStyleSheet("")
-        QMessageBox.information(self.view, "Success", f"Rate updated to: {val} {unit}")
+        QMessageBox.information(self.view, "Success", f"Rate updated to: {rate_val} {rate_unit}")
 
     def _apply_relative_change(self, sign: int):
         if not self.backend or not self.backend._is_connected:
@@ -858,10 +968,13 @@ class AppController:
         except ValueError:
             QMessageBox.warning(self.view, "Error", "Invalid step value.")
             return
-        new_val   = current + sign * step
-        unit      = self.view.get_pressure_unit()
-        scpi_unit = "MPA" if unit == "MPa" else "BAR"
-        self.backend.write(f":UNIT:PRES {scpi_unit}")
+        rate_result = self._read_and_validate_rate()
+        if rate_result is None:
+            return
+        rate_val, rate_unit, rate_per_min = rate_result
+
+        new_val = current + sign * step
+        unit    = self.view.get_pressure_unit()
         if self._positive_source is not None and new_val > self._positive_source:
             QMessageBox.warning(
                 self.view, "Target Exceeds +ve Source",
@@ -870,10 +983,24 @@ class AppController:
                     f"Target has not been updated."
             )
             return
-        self.backend.set_target_pressure(new_val)
+        max_safe_mpa = self._read_max_safe_pressure_mpa()
+        if max_safe_mpa is not None and new_val * PRESSURE_UNIT_TO_MPA[unit] > max_safe_mpa:
+            QMessageBox.warning(
+                self.view, "Target Exceeds Max Safe Pressure",
+                f"Set value ({new_val:.4g} {unit}) exceeds the configured Max Safe Pressure "
+                    f"({max_safe_mpa / PRESSURE_UNIT_TO_MPA[unit]:.4g} {unit}).\n"
+                    f"Target has not been updated."
+            )
+            return
+        try:
+            self.backend.set_pressure_with_ramp(new_val, rate_per_min, unit=unit)
+        except RuntimeError as e:
+            QMessageBox.warning(self.view, "Error", str(e))
+            return
         self._last_target_str = f"{new_val:.4g}"
         self.view.target_input.setText(f"{new_val:.4g}")
         self.view.target_input.setStyleSheet("")
+        self.view.rate_input.setStyleSheet("")
 
     # ----------------------------------------------------------
     def _do_initial_fetch(self):
@@ -906,6 +1033,16 @@ class AppController:
         neg = self.backend.get_negative_source_pressure()
         if pos is not None and neg is not None:
             self.update_source_pressures(pos, neg)
+        full_scale_mpa = self.backend.get_control_full_scale_mpa()
+        if full_scale_mpa is not None:
+            self._instrument_full_scale_mpa = full_scale_mpa
+            unit = self.view.get_pressure_unit()
+            display_val = full_scale_mpa / PRESSURE_UNIT_TO_MPA[unit]
+            self.view.instrument_full_scale_label.setText(
+                f"Instrument full-scale: {display_val:.4g} {unit}"
+            )
+            if not self.view.max_safe_pressure_input.text().strip():
+                self.view.max_safe_pressure_input.setText(_format_num(display_val))
 
     def _on_target_input_edited(self, _text: str):
         self.view.target_input.setStyleSheet("background-color: #e6ffe6;")
@@ -956,11 +1093,17 @@ class AppController:
                 )
             self._convert_line_edit_value(self.view.target_input, factor)
             self._convert_line_edit_value(self.view.rate_input, factor)
+            self._convert_line_edit_value(self.view.max_safe_pressure_input, factor)
             if self._live_target_native is not None:
                 self._live_target_native *= factor
             if self._live_slew_native_per_sec is not None:
                 self._live_slew_native_per_sec *= factor
             self._logging_unit = unit
+        if self._instrument_full_scale_mpa is not None:
+            display_val = self._instrument_full_scale_mpa / PRESSURE_UNIT_TO_MPA[unit]
+            self.view.instrument_full_scale_label.setText(
+                f"Instrument full-scale: {display_val:.4g} {unit}"
+            )
         self._render_live_setpoints()
 
     def _on_rate_time_unit_changed(self, new_time_unit: str):
@@ -1054,10 +1197,20 @@ class AppController:
                         f"Entered value: {rate:.4g} {rate_unit}."
                 )
                 return
+            pressure_unit = self.view.sched_pressure_unit.currentText()
+            max_safe_mpa = self._read_max_safe_pressure_mpa()
+            if max_safe_mpa is not None and pressure * PRESSURE_UNIT_TO_MPA.get(pressure_unit, 1.0) > max_safe_mpa:
+                max_safe_display = max_safe_mpa / PRESSURE_UNIT_TO_MPA.get(pressure_unit, 1.0)
+                QMessageBox.warning(
+                    self.view, "Error",
+                    f"Pressure ({pressure:.4g} {pressure_unit}) exceeds the configured "
+                        f"Max Safe Pressure ({max_safe_display:.4g} {pressure_unit})."
+                )
+                return
             new_item = {
                 "type":          "change_pressure",
                 "pressure":      pressure,
-                "pressure_unit": self.view.sched_pressure_unit.currentText(),
+                "pressure_unit": pressure_unit,
                 "rate":          rate,
                 "rate_unit":     rate_unit,
             }
@@ -1319,6 +1472,11 @@ class AppController:
 
     def handle_error(self, err_msg: str):
         print(f"[PACE5000] Instrument Error: {err_msg}")
+
+    def handle_instrument_error(self, code: int, message: str):
+        print(f"[PACE5000] SYST:ERR {code}: {message}")
+        self.view.instrument_error_label.setText(f"Last Instrument Error: {code} {message}")
+        self.view.instrument_error_label.setStyleSheet("color: red; font-weight: bold;")
 
 
 # ==============================================================
