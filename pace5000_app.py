@@ -362,6 +362,10 @@ class AppController:
     # updated label rather than a one-shot popup.
     _EFFORT_WARNING_THRESHOLD_PERCENT = 90.0
     _EFFORT_WARNING_SUSTAINED_S = 30.0
+    # Safety net: if the vacuum valve ends up doing more than half the work
+    # (effort this negative or lower), force the device out of Control mode
+    # rather than let it keep pulling towards -100%.
+    _EFFORT_AUTO_MEASURE_THRESHOLD_PERCENT = -50.0
 
     def __init__(self, view: PaceUI, backend: Pace5000Backend = None, api_cli: dict | None = None):
         self.view    = view
@@ -735,6 +739,12 @@ class AppController:
         )
 
     def _on_effort_updated(self, effort: float):
+        if (
+            effort <= self._EFFORT_AUTO_MEASURE_THRESHOLD_PERCENT
+            and self.view.radio_control.isChecked()
+        ):
+            self._auto_switch_to_measure(effort)
+
         now = time.time()
         saturated = abs(effort) >= self._EFFORT_WARNING_THRESHOLD_PERCENT
         if not saturated:
@@ -766,6 +776,40 @@ class AppController:
         else:
             self.view.effort_status_label.setText(f"Effort: {effort:.1f}%")
             self.view.effort_status_label.setStyleSheet("color: gray; font-weight: bold;")
+
+    def _auto_switch_to_measure(self, effort: float):
+        """Safety trip: force the device out of Control mode once the vacuum
+        valve is doing more than half the work, rather than let effort keep
+        pulling towards -100%. Mirrors the backend->UI radio sync in
+        _do_initial_fetch() since this is a device-state change the radios
+        did not originate from.
+        """
+        if not self.backend:
+            return
+        try:
+            self.backend.set_control_mode(False)
+        except RuntimeError as e:
+            QMessageBox.critical(
+                self.view, "PACE5000 Error",
+                f"Auto Measure-mode switch failed: {e}",
+            )
+            return
+        self.view.radio_control.blockSignals(True)
+        self.view.radio_measure.blockSignals(True)
+        self.view.radio_control.setChecked(False)
+        self.view.radio_measure.setChecked(True)
+        self.view.radio_control.blockSignals(False)
+        self.view.radio_measure.blockSignals(False)
+        print(
+            f"[PACE5000] Effort {effort:.1f}% <= "
+            f"{self._EFFORT_AUTO_MEASURE_THRESHOLD_PERCENT:.0f}% — auto-switched to Measure mode"
+        )
+        QMessageBox.warning(
+            self.view, "Auto-switched to Measure mode",
+            f"Controller effort reached {effort:.1f}% "
+            f"(≤ {self._EFFORT_AUTO_MEASURE_THRESHOLD_PERCENT:.0f}%).\n"
+            f"PACE5000 has been automatically switched to Measure mode.",
+        )
 
     # ----------------------------------------------------------
     def start_logging(self):
