@@ -64,6 +64,14 @@ class Pace5000Backend(QObject):
         # tol_mpa into a %FS band for :SOUR:PRES:INL. Reset on disconnect in
         # case a later reconnect targets a different range/instrument.
         self._control_fs_mpa: Optional[float] = None
+        # Tracks whichever unit was last pushed to the device's :UNIT:PRES
+        # (see PRESSURE_UNIT_TO_MPA) -- every write() of ":UNIT:PRES ..."
+        # anywhere in this class must keep this in sync. get_status_mpa()
+        # relies on it to convert raw (device-unit) readings to MPa without
+        # having to force the device into MPa itself, which would fight the
+        # manual control tab's currently selected display unit on every
+        # poll of a frequently-polled endpoint.
+        self._active_pressure_unit: str = "MPa"
 
     @property
     def _is_connected(self):
@@ -100,6 +108,7 @@ class Pace5000Backend(QObject):
         self.timer.stop()
         self.connected = False
         self._control_fs_mpa = None
+        self._active_pressure_unit = "MPa"
         try:
             if self.sock:
                 self.sock.close()
@@ -121,6 +130,7 @@ class Pace5000Backend(QObject):
     def initialize_device(self):
         try:
             self.write(":UNIT:PRES MPA")
+            self._active_pressure_unit = "MPa"
             time.sleep(0.05)
             self.write(":SOUR:PRES:SLEW:MODE LINEAR")
             time.sleep(0.05)
@@ -195,6 +205,21 @@ class Pace5000Backend(QObject):
         # Device echoes the command header before the value, e.g. ':SENS:PRES 0.009'
         return resp.split()[-1] if resp else resp
 
+    def set_active_pressure_unit(self, unit: str) -> None:
+        """Push `unit` ("MPa" or "Bar") to the device's :UNIT:PRES and record
+        it in _active_pressure_unit.
+
+        The manual control tab must call this (not write() directly)
+        whenever the operator changes the displayed pressure unit, so that
+        get_status_mpa() can keep converting raw readings to MPa correctly
+        no matter which unit the device is actually sitting in.
+        """
+        if unit not in PRESSURE_UNIT_TO_MPA:
+            raise ValueError(f"unit must be one of {sorted(PRESSURE_UNIT_TO_MPA)}")
+        scpi_unit = "MPA" if unit == "MPa" else "BAR"
+        self.write(f":UNIT:PRES {scpi_unit}")
+        self._active_pressure_unit = unit
+
     def set_slew_rate(self, value, unit="MPa/min"):
         if unit in ("MPa/min", "Bar/min"):
             value_per_sec = value / 60.0
@@ -226,12 +251,33 @@ class Pace5000Backend(QObject):
         except Exception:
             return None
 
-    def set_control_mode(self, enabled: bool):
+    def set_control_mode(self, enabled: bool, verify_retries: int = 3):
+        """Write :OUTP:STAT and confirm the device actually applied it via
+        readback before returning -- mirrors the slew-rate verification in
+        set_pressure_with_ramp(). Callers (the HTTP API in particular) must
+        be able to trust that a successful call means the device is really
+        in the requested mode, not just that the write didn't raise.
+
+        Raises RuntimeError if the readback doesn't confirm `enabled` after
+        verify_retries attempts.
+        """
         val = 1 if enabled else 0
         self.write(f":OUTP:STAT {val}")
-        time.sleep(0.05)
-        resp = self.query(":OUTP:STAT?")
-        print("[PACE5000] OUTPUT =", resp)
+        resp = None
+        for _ in range(verify_retries):
+            time.sleep(0.05)
+            resp = self.query(":OUTP:STAT?")
+            if resp is not None:
+                try:
+                    if bool(int(resp)) == enabled:
+                        print("[PACE5000] OUTPUT =", resp)
+                        return
+                except ValueError:
+                    pass
+        raise RuntimeError(
+            f"PACE5000 control mode verification failed ({verify_retries} attempts): "
+            f"sent enabled={enabled}, device reports {resp!r}"
+        )
 
     def set_output_state(self, state):
         self.set_control_mode(state)
@@ -275,6 +321,7 @@ class Pace5000Backend(QObject):
         """
         if self._control_fs_mpa is None:
             self.write(":UNIT:PRES MPA")
+            self._active_pressure_unit = "MPa"
             resp = self.query(":INST:SENS1:FULL?")
             if resp is None:
                 return None
@@ -356,6 +403,37 @@ class Pace5000Backend(QObject):
         except Exception:
             return None
 
+    def get_status_mpa(self) -> dict[str, Optional[float]]:
+        """Pressure, target, slew rate and source pressures, all converted to
+        MPa -- for the HTTP API's /status endpoint, which must report a
+        fixed unit regardless of the device's actively selected display
+        unit (:UNIT:PRES), which the manual control tab may have left on
+        Bar.
+
+        Converts client-side using the tracked _active_pressure_unit rather
+        than forcing the device into MPa and reading it back: /status is
+        meant to be polled frequently, and repeatedly forcing :UNIT:PRES
+        would fight the manual tab's currently selected unit on every poll.
+        Relies on every :UNIT:PRES write in this class keeping
+        _active_pressure_unit accurate (see set_active_pressure_unit()).
+        """
+        factor = PRESSURE_UNIT_TO_MPA[self._active_pressure_unit]
+
+        def to_mpa(raw) -> Optional[float]:
+            try:
+                return float(raw) * factor
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            "pressure_mpa": to_mpa(self.get_pressure()),
+            "target_pressure_mpa": to_mpa(self.get_target_pressure()),
+            "slew_rate_mpa_per_sec": to_mpa(self.get_slew_rate()),
+            "source_pressure_positive_mpa": to_mpa(self.get_positive_source_pressure()),
+            "source_pressure_negative_mpa": to_mpa(self.get_negative_source_pressure()),
+            "effort_percent": self.get_effort(),
+        }
+
     def poll_pressure(self):
         if not self.connected:
             return
@@ -396,8 +474,11 @@ class Pace5000Backend(QObject):
         unit: str = "MPa",
         check_source_pressure: bool = True,
         slew_verify_retries: int = 3,
+        target_verify_retries: int = 3,
         on_slew_send: Optional[Callable[[], None]] = None,
         on_slew_verified: Optional[Callable[[float], None]] = None,
+        on_target_send: Optional[Callable[[], None]] = None,
+        on_target_verified: Optional[Callable[[float], None]] = None,
     ) -> None:
         """Set the target pressure, ramping at rate_per_min, both expressed
         in `unit` ("MPa" or "Bar" — a PRESSURE_UNIT_TO_MPA key).
@@ -415,13 +496,20 @@ class Pace5000Backend(QObject):
         device actually applied it *before* the setpoint is sent. Sending the
         setpoint first (or without verifying the rate) risks the device
         applying the new setpoint at whatever rate was previously in effect.
+        The setpoint itself is read back and verified the same way once sent
+        — a caller (in particular the HTTP API, whose response is the only
+        signal a remote client gets) must not be told "ok" for a setpoint
+        the device silently rejected or clamped.
 
         Raises RuntimeError if the target exceeds the +ve source pressure
-        (when check_source_pressure is True), or if the slew rate cannot be
-        verified after slew_verify_retries consecutive attempts.
+        (when check_source_pressure is True), if the slew rate cannot be
+        verified after slew_verify_retries consecutive attempts, or if the
+        setpoint readback doesn't confirm `pressure` after
+        target_verify_retries consecutive attempts.
         """
         scpi_unit = "MPA" if unit == "MPa" else "BAR"
         self.write(f":UNIT:PRES {scpi_unit}")
+        self._active_pressure_unit = unit
 
         if check_source_pressure:
             pos_source = self.get_positive_source_pressure()
@@ -463,7 +551,32 @@ class Pace5000Backend(QObject):
                     )
             time.sleep(0.2)
 
+        if on_target_send is not None:
+            on_target_send()
         self.set_target_pressure(pressure)
+
+        consecutive_failures = 0
+        while True:
+            actual_target_str = self.get_target_pressure()
+            actual_target = None
+            if actual_target_str is not None:
+                try:
+                    actual_target = float(actual_target_str)
+                except ValueError:
+                    actual_target = None
+            if actual_target is not None and abs(actual_target - pressure) <= 1e-5:
+                if on_target_verified is not None:
+                    on_target_verified(actual_target)
+                break
+            consecutive_failures += 1
+            if consecutive_failures >= target_verify_retries:
+                raise RuntimeError(
+                    f"PACE5000 target pressure verification failed "
+                    f"({target_verify_retries} consecutive): "
+                    f"sent {pressure:.6f} {unit}, "
+                    f"device reports {actual_target_str!r}"
+                )
+            time.sleep(0.2)
 
     def wait_for_pressure(
         self,
@@ -472,7 +585,7 @@ class Pace5000Backend(QObject):
         stop_event: Optional[Event] = None,
         timeout_s: Optional[float] = None,
         poll_interval_s: float = 0.2,
-        on_update: Optional[Callable[[float, float], None]] = None,
+        on_update: Optional[Callable[[float, float, float, float], None]] = None,
     ) -> Optional[float]:
         """Block until the measured pressure has stayed within tol_mpa of the
         device's current target setpoint (read via get_target_pressure())
@@ -488,6 +601,18 @@ class Pace5000Backend(QObject):
         declaring "reached" on a momentary noise spike, which a naive
         abs(current - target) <= tol single-sample check would do.
 
+        on_update, if given, is called on every poll with
+        (current_mpa, target_mpa, band_elapsed_s, dwell_s) so a caller can
+        show schedule/step progression as "how long has this been sitting
+        in the arrival band" rather than a bare current-vs-target readout.
+        band_elapsed_s is a client-side clock — reset to 0 the instant a
+        sample falls outside tol_mpa of the target, incremented while
+        samples stay inside it — capped at dwell_s. It is best-effort/UI
+        only: the authoritative reached/not-reached decision is still the
+        device's own :SENS:PRES:INL? flag above, which stays correct across
+        client-side scheduling jitter (GIL contention, GC pauses) in a way
+        a purely client-timed clock would not.
+
         Returns the final measured pressure on success. Returns None if
         stop_event is set before the target is reached (cooperative
         cancellation — callers translate this into their own
@@ -497,6 +622,7 @@ class Pace5000Backend(QObject):
         sensor full scale cannot be read.
         """
         self.write(":UNIT:PRES MPA")
+        self._active_pressure_unit = "MPa"
         raw = self.get_target_pressure()
         if raw is None:
             raise RuntimeError("Cannot read PACE5000 target pressure")
@@ -517,6 +643,7 @@ class Pace5000Backend(QObject):
         self.drain_system_errors()
 
         deadline = time.monotonic() + timeout_s if timeout_s is not None else None
+        band_entered_at: Optional[float] = None
         while True:
             if stop_event is not None and stop_event.is_set():
                 return None
@@ -529,8 +656,18 @@ class Pace5000Backend(QObject):
             result = self.get_pressure_in_limits()
             if result is not None:
                 current, in_limits = result
+                now = time.monotonic()
+                if abs(current - target_mpa) <= tol_mpa:
+                    if band_entered_at is None:
+                        band_entered_at = now
+                else:
+                    band_entered_at = None
+                band_elapsed_s = min(
+                    now - band_entered_at if band_entered_at is not None else 0.0,
+                    float(dwell_s_clamped),
+                )
                 if on_update is not None:
-                    on_update(current, target_mpa)
+                    on_update(current, target_mpa, band_elapsed_s, float(dwell_s_clamped))
                 if in_limits:
                     return current
             time.sleep(poll_interval_s)

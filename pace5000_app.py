@@ -145,7 +145,7 @@ class ScheduledControlRunner(QObject):
     # Internal, cross-thread plumbing only (see _wait_pressure_worker below).
     # Not part of the public interface — external code should connect to the
     # signals above, not these.
-    _pressure_progress   = pyqtSignal(float, float)   # current_mpa, target_mpa
+    _pressure_progress   = pyqtSignal(float, float, float, float)   # current_mpa, target_mpa, band_elapsed_s, dwell_s
     _pressure_reached    = pyqtSignal()
     _pressure_wait_error = pyqtSignal(str)
 
@@ -245,7 +245,15 @@ class ScheduledControlRunner(QObject):
         self._eta_warning_sent = False
 
         self._target_pressure_mpa = pressure_mpa
-        self._target_display_str  = f"{item['pressure']:.4g} {item['pressure_unit']}"
+        # Shown as an arrival *band*, not a bare number — wait_for_pressure()
+        # actually judges "reached" against target ± this tolerance held for
+        # DEFAULT_STABILITY_DWELL_S, so a plain target readout previously let
+        # an operator read "reached" as "hit this exact value", which it
+        # never was.
+        tol_disp = self._DEFAULT_PRESSURE_TOL_MPA / PRESSURE_UNIT_TO_MPA.get(item["pressure_unit"], 1.0)
+        self._target_display_str = (
+            f"{item['pressure']:.4g} ± {tol_disp:.4g} {item['pressure_unit']}"
+        )
 
         try:
             self.backend.set_pressure_with_ramp(pressure_mpa, rate_mpa_per_min)
@@ -270,7 +278,9 @@ class ScheduledControlRunner(QObject):
             result = self.backend.wait_for_pressure(
                 self._DEFAULT_PRESSURE_TOL_MPA,
                 stop_event=self._pressure_stop_event,
-                on_update=lambda cur, tgt: self._pressure_progress.emit(cur, tgt),
+                on_update=lambda cur, tgt, elapsed, dwell: self._pressure_progress.emit(
+                    cur, tgt, elapsed, dwell
+                ),
             )
         except Exception as e:
             self._pressure_wait_error.emit(str(e))
@@ -279,11 +289,20 @@ class ScheduledControlRunner(QObject):
             return  # cancelled via stop() — stop() already emitted `stopped`
         self._pressure_reached.emit()
 
-    def _on_pressure_progress(self, current_mpa: float, target_mpa: float):
+    def _on_pressure_progress(
+        self, current_mpa: float, target_mpa: float, band_elapsed_s: float, dwell_s: float,
+    ):
         if not self._running:
             return
         n, total = self.current_index + 1, len(self.items)
         current_disp = f"{current_mpa:.4g} MPa"
+        # Schedule progression during a change_pressure step is dwell-time
+        # based: entering the arrival band isn't "reached" by itself, so
+        # show how long the reading has held inside it against the dwell
+        # time actually required (Pace5000Backend.DEFAULT_STABILITY_DWELL_S),
+        # the same quantity wait_for_pressure() itself uses to decide
+        # reached/not-reached.
+        stability_str = f"  stable {band_elapsed_s:.1f}/{dwell_s:.0f}s" if band_elapsed_s > 0 else ""
         warning_str  = ""
         now = time.time()
         if self._pressure_eta and now > self._pressure_eta + self._ETA_WARNING_SEC:
@@ -297,7 +316,8 @@ class ScheduledControlRunner(QObject):
                         f"The sequence continues monitoring. Press Stop to abort."
                 )
         self.status_changed.emit(
-            f"Running [{n}/{total}]: Pressure → {self._target_display_str}  (current: {current_disp}){warning_str}"
+            f"Running [{n}/{total}]: Pressure → {self._target_display_str}  "
+            f"(current: {current_disp}){stability_str}{warning_str}"
         )
 
     def _on_pressure_reached(self):
@@ -835,7 +855,10 @@ class AppController:
             return
         is_control = self.view.radio_control.isChecked()
         if self.backend:
-            self.backend.set_control_mode(is_control)
+            try:
+                self.backend.set_control_mode(is_control)
+            except RuntimeError as e:
+                QMessageBox.critical(self.view, "PACE5000 Error", str(e))
 
     def _read_and_validate_rate(self) -> tuple[float, str, float] | None:
         """Parse + validate the rate input field against the hardware floor.
@@ -1080,8 +1103,7 @@ class AppController:
         self.view.rate_pressure_unit_display.setText(unit)
         self.view.plot_widget.setLabel("left", f"Pressure ({unit})")
         if self.backend and self.backend._is_connected:
-            scpi_unit = "MPA" if unit == "MPa" else "BAR"
-            self.backend.write(f":UNIT:PRES {scpi_unit}")
+            self.backend.set_active_pressure_unit(unit)
         old_unit = self._logging_unit
         if old_unit != unit:
             factor = PRESSURE_UNIT_TO_MPA[old_unit] / PRESSURE_UNIT_TO_MPA[unit]
