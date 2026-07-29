@@ -587,8 +587,15 @@ class AppController:
         # While the HTTP API is enabled, the device can be driven from another
         # process at any time — Manual Control and Scheduled Control must not
         # race against that, so both tabs are locked out entirely.
+        # Disabling the currently-selected tab makes QTabWidget silently jump
+        # the current index to the next enabled tab, which would flip the
+        # user's tab selection as a side effect of enabling/disabling the API
+        # — restore whatever tab was selected beforehand so the two stay
+        # independent.
+        current_index = self.view.tabs.currentIndex()
         self.view.tabs.setTabEnabled(0, enabled)
         self.view.tabs.setTabEnabled(1, enabled)
+        self.view.tabs.setCurrentIndex(current_index)
 
     def _on_api_toggled(self, checked: bool):
         if checked:
