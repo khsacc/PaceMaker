@@ -597,6 +597,12 @@ class AppController:
                 self.view.api_enable_cb.blockSignals(False)
         else:
             self._stop_api_server()
+            # While the API was enabled, an external client could have
+            # changed the target pressure, slew rate, or control mode
+            # directly on the instrument — re-read them now so the GUI
+            # doesn't keep showing stale values from before the API session.
+            if self.backend and self.backend._is_connected:
+                self._do_initial_fetch()
 
     def _on_api_regenerate(self):
         key = generate_api_key()
