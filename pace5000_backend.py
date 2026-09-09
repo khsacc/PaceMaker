@@ -1,3 +1,5 @@
+import csv
+import math
 import socket
 import time
 import serial
@@ -318,17 +320,38 @@ class Pace5000Backend(QObject):
         public method with more than one call site (wait_for_pressure() and
         the UI's initial post-connect fetch), so it must not depend on
         caller ordering to return a value in the unit its name promises.
+
+        Some PACE5000 firmware/instrument configurations have been observed
+        returning the lower range limit (for example -0.1 MPa) for FULL?.  A
+        full scale used as a divisor must be finite and positive, so reject
+        that response and fall back to :INST:LIM1?, whose second field is the
+        documented upper limit of the control-sensor range.
         """
         if self._control_fs_mpa is None:
             self.write(":UNIT:PRES MPA")
             self._active_pressure_unit = "MPa"
+            time.sleep(0.05)
             resp = self.query(":INST:SENS1:FULL?")
-            if resp is None:
-                return None
             try:
-                self._control_fs_mpa = float(resp)
-            except ValueError:
+                full_scale = float(resp) if resp is not None else None
+            except (TypeError, ValueError):
+                full_scale = None
+
+            if full_scale is None or not math.isfinite(full_scale) or full_scale <= 0:
+                limits_resp = self._query_line(":INST:LIM1?")
+                if limits_resp:
+                    _header, separator, body = limits_resp.partition(" ")
+                    if not separator:
+                        body = limits_resp
+                    try:
+                        fields = next(csv.reader([body], skipinitialspace=True))
+                        full_scale = float(fields[1])
+                    except (IndexError, TypeError, ValueError, csv.Error, StopIteration):
+                        full_scale = None
+
+            if full_scale is None or not math.isfinite(full_scale) or full_scale <= 0:
                 return None
+            self._control_fs_mpa = full_scale
         return self._control_fs_mpa
 
     def get_system_error(self) -> Optional[tuple[int, str]]:

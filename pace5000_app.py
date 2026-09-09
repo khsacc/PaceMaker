@@ -1121,8 +1121,6 @@ class AppController:
             self.view.instrument_full_scale_label.setText(
                 f"Instrument full-scale: {display_val:.4g} {unit}"
             )
-            if not self.view.max_safe_pressure_input.text().strip():
-                self.view.max_safe_pressure_input.setText(_format_num(display_val))
 
     def _on_target_input_edited(self, _text: str):
         self.view.target_input.setStyleSheet("background-color: #e6ffe6;")

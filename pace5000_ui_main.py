@@ -227,12 +227,12 @@ class PaceUI(QWidget):
         self.target_input = QLineEdit()
         self.target_input.setPlaceholderText("Enter target pressure and press ENTER")
         self.target_input.setToolTip("Press Enter to submit target pressure safely")
-        self.max_safe_pressure_input = QLineEdit()
-        self.max_safe_pressure_input.setPlaceholderText("optional — leave blank for no limit")
+        self.max_safe_pressure_input = QLineEdit("5")
+        self.max_safe_pressure_input.setPlaceholderText("leave blank for no limit")
         self.max_safe_pressure_input.setToolTip(
             "Soft ceiling for this run (e.g. gasket/diamond safety limit). "
-            "Pre-filled from the instrument's control-sensor full-scale on "
-            "connect; edit or clear as needed."
+            "Defaults to 5 MPa; edit or clear as needed. The instrument's "
+            "control-sensor full-scale is shown separately after connect."
         )
         self.instrument_full_scale_label = QLabel("Instrument full-scale: ---")
         self.instrument_full_scale_label.setStyleSheet("color: #777; font-size: 9pt;")
