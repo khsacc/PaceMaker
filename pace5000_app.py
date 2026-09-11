@@ -85,20 +85,18 @@ def _save_last_log_dir(directory: str) -> None:
 class SchedulePlotWindow(QWidget):
     _MAX_POINTS = 18_000  # ≈5 h at 1 sample/s
 
-    def __init__(self, t0: float, pressure_unit: str, parent=None):
+    def __init__(self, pressure_unit: str, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("Scheduled Control — Live Pressure")
         self.resize(880, 462)
-        self._t0        = t0
         self._times     = deque(maxlen=self._MAX_POINTS)
         self._pressures = deque(maxlen=self._MAX_POINTS)
 
         layout = QVBoxLayout(self)
-        self._plot_widget = pg.PlotWidget()
+        self._plot_widget = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
         self._plot_widget.setLabel("left", f"Pressure ({pressure_unit})")
-        self._plot_widget.setLabel("bottom", "Elapsed Time", units="s")
+        self._plot_widget.setLabel("bottom", "Time")
         self._plot_widget.getAxis("left").enableAutoSIPrefix(False)
-        self._plot_widget.getAxis("bottom").enableAutoSIPrefix(False)
         self._plot_widget.showGrid(x=True, y=True, alpha=0.2)
         self._curve = self._plot_widget.plot(pen=pg.mkPen("#e63900", width=2))
         self._curve.setDownsampling(auto=True, method='peak')
@@ -106,7 +104,7 @@ class SchedulePlotWindow(QWidget):
         layout.addWidget(self._plot_widget)
 
     def add_point(self, pressure: float):
-        self._times.append(time.time() - self._t0)
+        self._times.append(time.time())
         self._pressures.append(pressure)
         self._curve.setData(list(self._times), list(self._pressures))
 
@@ -365,7 +363,7 @@ class AppController:
     # Safety net: if the vacuum valve ends up doing more than half the work
     # (effort this negative or lower), force the device out of Control mode
     # rather than let it keep pulling towards -100%.
-    _EFFORT_AUTO_MEASURE_THRESHOLD_PERCENT = -50.0
+    _EFFORT_AUTO_MEASURE_THRESHOLD_PERCENT = -40.0
 
     def __init__(self, view: PaceUI, backend: Pace5000Backend = None, api_cli: dict | None = None):
         self.view    = view
@@ -675,7 +673,6 @@ class AppController:
         self.time_data.clear()
         self.pressure_data.clear()
         self.view.plot_curve.setData([], [])
-        self.view.plot_widget.plotItem.vb.setLimits(xMin=0, xMax=None)
         self.view.plot_widget.plotItem.enableAutoRange()
 
     def _on_interval_changed(self, value_s: float):
@@ -699,11 +696,10 @@ class AppController:
             self.pressure_data.popleft()
 
         window_sec = self.view.plot_time_window_spinbox.value()
-        t0     = self.time_data[0]
-        x_data = [(v - t0) for v in self.time_data]
+        x_data = list(self.time_data)
         y_data = list(self.pressure_data)
         x_last = x_data[-1]
-        x_min_display = max(0.0, x_last - window_sec)
+        x_min_display = x_last - window_sec
         self.view.plot_curve.setData(x_data, y_data)
         self.view.plot_widget.setXRange(x_min_display, x_last, padding=0.05)
 
@@ -1479,7 +1475,7 @@ class AppController:
 
         if self._sched_plot_window is not None:
             self._sched_plot_window.close()
-        self._sched_plot_window = SchedulePlotWindow(self._sched_log_start, unit)
+        self._sched_plot_window = SchedulePlotWindow(unit)
         self.backend.pressure_updated.connect(self._sched_plot_window.add_point)
         self._sched_plot_window.show()
 
