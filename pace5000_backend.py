@@ -74,6 +74,20 @@ class Pace5000Backend(QObject):
         # manual control tab's currently selected display unit on every
         # poll of a frequently-polled endpoint.
         self._active_pressure_unit: str = "MPa"
+        self._readings_lock = Lock()
+        self._cached_pressure_mpa: Optional[float] = None
+        self._cached_target_mpa: Optional[float] = None
+        self._cached_at: Optional[float] = None
+
+    def get_cached_readings(self) -> dict:
+        """Return the last poll's pressure and target without device I/O."""
+        with self._readings_lock:
+            return {
+                "connected": self.connected,
+                "timestamp": self._cached_at if self.connected else None,
+                "pressure_mpa": self._cached_pressure_mpa if self.connected else None,
+                "target_pressure_mpa": self._cached_target_mpa if self.connected else None,
+            }
 
     @property
     def _is_connected(self):
@@ -111,6 +125,10 @@ class Pace5000Backend(QObject):
         self.connected = False
         self._control_fs_mpa = None
         self._active_pressure_unit = "MPa"
+        with self._readings_lock:
+            self._cached_pressure_mpa = None
+            self._cached_target_mpa = None
+            self._cached_at = None
         try:
             if self.sock:
                 self.sock.close()
@@ -473,6 +491,20 @@ class Pace5000Backend(QObject):
             self.effort_updated.emit(effort)
         target_raw = self.get_target_pressure()
         slew_raw = self.get_slew_rate()
+        factor = PRESSURE_UNIT_TO_MPA[self._active_pressure_unit]
+
+        def cached_mpa(value):
+            try:
+                converted = float(value) * factor
+                return converted if math.isfinite(converted) else None
+            except (TypeError, ValueError):
+                return None
+
+        with self._readings_lock:
+            if pressure is not None or target_raw is not None:
+                self._cached_pressure_mpa = cached_mpa(pressure)
+                self._cached_target_mpa = cached_mpa(target_raw)
+                self._cached_at = time.time()
         if target_raw is not None and slew_raw is not None:
             try:
                 self.setpoint_updated.emit(float(target_raw), float(slew_raw))

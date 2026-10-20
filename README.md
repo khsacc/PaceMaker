@@ -6,19 +6,17 @@ A PyQt6 desktop GUI for controlling and logging a **Druck PACE5000** pressure co
 
 - Connect via **TCP/IP** (SCPI over port 5025) or **Serial (RS-232)**
 - Set target pressure and slew rate; switch between Control / Measure modes
-- Manual "Apply" (target field, +/- step buttons) goes through the same slew-rate-verified-before-setpoint path as Scheduled Control / exp_scheduler / the HTTP API (`Pace5000Backend.set_pressure_with_ramp()`) — a rate typed into the rate field is always sent and read-back-verified together with the target, never assumed to already be correctly set on the device
+- Manual target entry (press Enter) and +/- step buttons go through the same slew-rate-verified-before-setpoint path as Scheduled Control / exp_scheduler / the HTTP API (`Pace5000Backend.set_pressure_with_ramp()`) — a rate typed into the rate field is always sent and read-back-verified together with the target, never assumed to already be correctly set on the device
 - Overshoot suppression (`:SOUR:PRES:SLEW:OVER 0`) is sent on every connect and is not user-configurable — this app has no scenario where overshoot past the setpoint is acceptable
 - "Pressure reached" requires the reading to stay within tolerance continuously for `Pace5000Backend.DEFAULT_STABILITY_DWELL_S` (2 s) — a single in-tolerance sample is not enough. Enforced device-side via `:SOUR:PRES:INL` / `:SOUR:PRES:INL:TIME`, not user-configurable
 - **Effort monitoring**: the controller effort (`:SOUR:PRES:EFF?`, -100 to +100 %) is read every poll and shown live next to the pressure reading. If it stays at/above 90% (either direction) for 30 s continuously, a warning appears explaining the likely cause (supply valve maxed → source pressure/slew rate; vacuum valve maxed → leak/blocked line) — useful for spotting a system that can't actually keep up with the requested ramp
 - **Auto Measure-mode safety trip**: if the effort drops to/below -50% while in Control mode (the vacuum valve is doing more than half the work), the app automatically switches the device to Measure mode and alerts the operator — a fail-safe against continuing to pull towards -100%
-- **Max Safe Pressure**: an optional, editable ceiling on the manual target field (and +/- step, and Scheduled Control items), defaulting to 5 MPa and meant to be tightened per-experiment (e.g. to the gasket/diamond's actual safe limit) — not persisted across sessions, since the right value depends on what's currently mounted. The instrument full-scale is still read and displayed separately; if `:INST:SENS1:FULL?` returns a non-positive value, the backend checks the upper limit reported by `:INST:LIM1?` instead.
+- The instrument full-scale is read internally when converting an absolute tolerance to the device's percentage arrival band. If `:INST:SENS1:FULL?` returns a non-positive value, the backend checks the upper limit reported by `:INST:LIM1?` instead.
 - Live pressure chart with configurable time window
 - CSV data logging
 - **Scheduled control**: build a sequence of pressure steps and waits, save/load as JSON, and run with live plot and automatic logging
 - **HTTP API** (standalone mode only): control and monitor the device from another process on the same machine, or another machine on the LAN — see [API](#api) below
-
-### Main window
-![GUI Main Window](./docs/screenshot_main.jpg)
+- **Local readings endpoint**: while connected, `GET http://127.0.0.1:8766/api/v1/readings` returns the last polled pressure and target setpoint without a device query. This read-only endpoint starts automatically in standalone and embedded mode.
 
 ### Scheduled control window
 ![GUI scheduled control window](./docs/screenshot_schedule.jpg)
@@ -51,6 +49,19 @@ The last-used log save directory is also persisted in `pace5000_settings.json` a
 
 ## API
 
+### Local readings endpoint
+
+`GET http://127.0.0.1:8766/api/v1/readings` returns JSON such as
+`{"connected": true, "timestamp": 1790000000.0, "pressure_mpa": 1.23, "target_pressure_mpa": 1.5}`.
+The timestamp is Unix time in seconds for the last poll. Measured values are
+`null` until the first poll. The listener stops on a normal disconnect. This
+server binds to loopback only, accepts GET only, and does not send commands to the instrument. If port
+8766 is already in use, the instrument connection still works but this
+endpoint is unavailable. The existing optional API also offers this cached
+`/api/v1/readings` path on its configured port.
+
+### Optional control API
+
 Only available when running `app.py` standalone (not when this app is embedded in another launcher). Open **API → Configure and start API** from the menu bar once connected and enable it there, or auto-start it with `--api` on the command line:
 
 ```
@@ -65,6 +76,7 @@ All endpoints are under `/api/v1`. Request/response bodies are JSON.
 |---|---|---|---|
 | GET | `/api/v1/health` | no | `{"ok": true}` — liveness check |
 | GET | `/api/v1/status` | yes | Current pressure, target, slew rate, control mode, source pressures, controller effort (`effort_percent`). All pressure/rate fields are always reported in MPa (`_mpa` suffix) regardless of the unit currently selected in the Manual Control tab (see implementation note below). |
+| GET | `/api/v1/readings` | yes | Last polled pressure and target in MPa, with a Unix timestamp. Uses the cache; performs no device I/O. |
 | POST | `/api/v1/pressure` | yes | Body `{"pressure": 2.0, "unit": "MPa", "rate": 0.2, "rate_unit": "MPa/min", "token": "..."}`. Sets the slew rate (verified) then the setpoint (verified); returns immediately once the device readback confirms the setpoint — does **not** wait for the pressure to arrive. `unit` is `"MPa"` or `"Bar"`; `rate_unit` is `"MPa/min"`, `"Bar/min"`, `"MPa/sec"`, or `"Bar/sec"`. `token` is only required if someone currently holds the lease (see below) — omit it otherwise. 403 if a lease is held and `token` doesn't match it. 409 if the target exceeds the +ve source pressure, the device's slew rate can't be verified, or the setpoint readback doesn't confirm what was sent (e.g. silently clamped by the device). A 200 response means the device has genuinely accepted both values, not just that the write didn't error. |
 | POST | `/api/v1/control_mode` | yes | Body `{"enabled": true, "token": "..."}` — toggle Control/Measure mode. Verified via `:OUTP:STAT?` readback before responding; 403 if a lease is held and `token` doesn't match it; 409 if the device doesn't confirm the requested mode after a few retries. |
 | GET | `/api/v1/pressure/wait` | yes | Query `tol`, `unit`, `timeout_s` (capped at 300 s, must be at least `Pace5000Backend.DEFAULT_STABILITY_DWELL_S` s or 400). Blocks until the measured pressure has stayed within `tol` of the current target continuously for `DEFAULT_STABILITY_DWELL_S` seconds, or returns 408 on timeout. For waits longer than a few tens of seconds, prefer polling `/status` yourself instead of holding this connection open. |

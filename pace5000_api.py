@@ -115,7 +115,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._unauthorized()
             return
 
-        if path == f"{API_PREFIX}/status":
+        if path == f"{API_PREFIX}/readings":
+            self._send_json(200, self._backend().get_cached_readings())
+        elif path == f"{API_PREFIX}/status":
             self._handle_status()
         elif path == f"{API_PREFIX}/pressure/wait":
             self._handle_wait_pressure(parse_qs(parsed.query))

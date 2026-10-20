@@ -34,6 +34,7 @@ from .pace5000_backend import (
     MIN_SLEW_RATE_MPA_PER_SEC, rate_to_mpa_per_sec,
 )
 from .pace5000_api import Pace5000ApiServer, generate_api_key
+from .pace5000_readings_api import Pace5000ReadingsServer
 
 
 def _format_num(value: float) -> str:
@@ -374,6 +375,7 @@ class AppController:
         # api_cli, when given, comes from CLI flags (--api/--api-host/...) and
         # auto-starts the server once the device connection succeeds.
         self.api_server: Pace5000ApiServer | None = None
+        self._readings_server: Pace5000ReadingsServer | None = None
         self._api_cli = api_cli if self._owns_backend else None
 
         self.time_data:     deque = deque()
@@ -407,7 +409,6 @@ class AppController:
         self._live_target_native: float | None = None
         self._live_slew_native_per_sec: float | None = None
         self._effort_saturated_since: float | None = None
-        self._instrument_full_scale_mpa: float | None = None
 
         if backend is not None:
             # Connection managed by the launcher — wire signals and hide connection UI
@@ -532,6 +533,7 @@ class AppController:
         self.backend.connect_device()
 
     def disconnect_device(self):
+        self._stop_readings_server()
         self._stop_api_server()
         if self._logging_active:
             self.stop_logging()
@@ -566,6 +568,23 @@ class AppController:
         self.view.btn_api_regenerate.setEnabled(False)
         self._set_control_tabs_enabled(False)
         return True
+
+    def _start_readings_server(self):
+        if self._readings_server is not None:
+            return
+        server = Pace5000ReadingsServer(self.backend)
+        try:
+            server.start()
+        except OSError as exc:
+            print(f"[PACE5000] Readings endpoint unavailable: {exc}")
+            return
+        self._readings_server = server
+        print(f"[PACE5000] Readings endpoint: {server.listen_url}")
+
+    def _stop_readings_server(self):
+        if self._readings_server is not None:
+            self._readings_server.stop()
+            self._readings_server = None
 
     def _stop_api_server(self):
         if self.api_server is not None:
@@ -624,6 +643,8 @@ class AppController:
     # ----------------------------------------------------------
     def handle_connection_status(self, connected: bool):
         if connected:
+            if self._owns_backend:
+                self._start_readings_server()
             self.view.status_label.setText("Status: Connected")
             self.view.status_label.setStyleSheet("color: green; font-weight: bold;")
             self.view.instrument_error_label.setText("Last Instrument Error: none")
@@ -644,6 +665,7 @@ class AppController:
                     self.view.api_enable_cb.setChecked(True)
                     self.view.api_enable_cb.blockSignals(False)
         else:
+            self._stop_readings_server()
             self.view.status_label.setText("Status: Disconnected")
             self.view.status_label.setStyleSheet("color: red; font-weight: bold;")
             self.view.source_pressure_label.setText("−ve source:  ---    +ve source:  ---")
@@ -651,13 +673,11 @@ class AppController:
             self.view.effort_label.setText("Effort:  ---  %")
             self.view.effort_status_label.setText("Effort: ---")
             self.view.effort_status_label.setStyleSheet("color: gray; font-weight: bold;")
-            self.view.instrument_full_scale_label.setText("Instrument full-scale: ---")
             self._positive_source = None
             self._negative_source = None
             self._live_target_native = None
             self._live_slew_native_per_sec = None
             self._effort_saturated_since = None
-            self._instrument_full_scale_mpa = None
             self.view.btn_connect.setEnabled(True)
             self.view.btn_disconnect.setEnabled(False)
             self.view.btn_log_start.setEnabled(False)
@@ -939,23 +959,6 @@ class AppController:
         rate_per_min = rate_val if time_unit == "min" else rate_val * 60.0
         return rate_val, rate_unit, rate_per_min
 
-    def _read_max_safe_pressure_mpa(self) -> float | None:
-        """Parse the optional Max Safe Pressure field into MPa.
-
-        Returns None if left blank (no ceiling configured) — an unparseable
-        value is also treated as "no ceiling" since this is a soft,
-        user-editable safety aid, not a required field, and should never
-        block a pressure change with a confusing error of its own.
-        """
-        text = self.view.max_safe_pressure_input.text().strip()
-        if not text:
-            return None
-        try:
-            val = float(text)
-        except ValueError:
-            return None
-        return val * PRESSURE_UNIT_TO_MPA[self.view.get_pressure_unit()]
-
     def update_target(self):
         if not self.backend or not self.backend._is_connected:
             QMessageBox.warning(self.view, "Error", "Device not connected!")
@@ -975,17 +978,6 @@ class AppController:
                 self.view, "Target Exceeds +ve Source",
                 f"Set value ({val:.4g} {unit}) exceeds +ve source pressure "
                     f"({self._positive_source:.4g} {unit}).\n"
-                    f"Target has not been updated."
-            )
-            self.view.target_input.setText(self._last_target_str)
-            self.view.target_input.setStyleSheet("")
-            return
-        max_safe_mpa = self._read_max_safe_pressure_mpa()
-        if max_safe_mpa is not None and val * PRESSURE_UNIT_TO_MPA[unit] > max_safe_mpa:
-            QMessageBox.warning(
-                self.view, "Target Exceeds Max Safe Pressure",
-                f"Set value ({val:.4g} {unit}) exceeds the configured Max Safe Pressure "
-                    f"({max_safe_mpa / PRESSURE_UNIT_TO_MPA[unit]:.4g} {unit}).\n"
                     f"Target has not been updated."
             )
             self.view.target_input.setText(self._last_target_str)
@@ -1059,15 +1051,6 @@ class AppController:
                     f"Target has not been updated."
             )
             return
-        max_safe_mpa = self._read_max_safe_pressure_mpa()
-        if max_safe_mpa is not None and new_val * PRESSURE_UNIT_TO_MPA[unit] > max_safe_mpa:
-            QMessageBox.warning(
-                self.view, "Target Exceeds Max Safe Pressure",
-                f"Set value ({new_val:.4g} {unit}) exceeds the configured Max Safe Pressure "
-                    f"({max_safe_mpa / PRESSURE_UNIT_TO_MPA[unit]:.4g} {unit}).\n"
-                    f"Target has not been updated."
-            )
-            return
         try:
             self.backend.set_pressure_with_ramp(new_val, rate_per_min, unit=unit)
         except RuntimeError as e:
@@ -1109,14 +1092,6 @@ class AppController:
         neg = self.backend.get_negative_source_pressure()
         if pos is not None and neg is not None:
             self.update_source_pressures(pos, neg)
-        full_scale_mpa = self.backend.get_control_full_scale_mpa()
-        if full_scale_mpa is not None:
-            self._instrument_full_scale_mpa = full_scale_mpa
-            unit = self.view.get_pressure_unit()
-            display_val = full_scale_mpa / PRESSURE_UNIT_TO_MPA[unit]
-            self.view.instrument_full_scale_label.setText(
-                f"Instrument full-scale: {display_val:.4g} {unit}"
-            )
 
     def _on_target_input_edited(self, _text: str):
         self.view.target_input.setStyleSheet("background-color: #e6ffe6;")
@@ -1166,17 +1141,11 @@ class AppController:
                 )
             self._convert_line_edit_value(self.view.target_input, factor)
             self._convert_line_edit_value(self.view.rate_input, factor)
-            self._convert_line_edit_value(self.view.max_safe_pressure_input, factor)
             if self._live_target_native is not None:
                 self._live_target_native *= factor
             if self._live_slew_native_per_sec is not None:
                 self._live_slew_native_per_sec *= factor
             self._logging_unit = unit
-        if self._instrument_full_scale_mpa is not None:
-            display_val = self._instrument_full_scale_mpa / PRESSURE_UNIT_TO_MPA[unit]
-            self.view.instrument_full_scale_label.setText(
-                f"Instrument full-scale: {display_val:.4g} {unit}"
-            )
         self._render_live_setpoints()
 
     def _on_rate_time_unit_changed(self, new_time_unit: str):
@@ -1271,15 +1240,6 @@ class AppController:
                 )
                 return
             pressure_unit = self.view.sched_pressure_unit.currentText()
-            max_safe_mpa = self._read_max_safe_pressure_mpa()
-            if max_safe_mpa is not None and pressure * PRESSURE_UNIT_TO_MPA.get(pressure_unit, 1.0) > max_safe_mpa:
-                max_safe_display = max_safe_mpa / PRESSURE_UNIT_TO_MPA.get(pressure_unit, 1.0)
-                QMessageBox.warning(
-                    self.view, "Error",
-                    f"Pressure ({pressure:.4g} {pressure_unit}) exceeds the configured "
-                        f"Max Safe Pressure ({max_safe_display:.4g} {pressure_unit})."
-                )
-                return
             new_item = {
                 "type":          "change_pressure",
                 "pressure":      pressure,
