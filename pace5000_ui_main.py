@@ -369,7 +369,7 @@ class PaceUI(QWidget):
         )
         info_label.setStyleSheet(
             "color: #336; font-size: 9pt; background: #eef4ff;"
-            "border: 1px solid #aac; border-radius: 4px; padding: 6px;"
+            "border: 1px solid #aac; border-radius: 1px; padding: 6px;"
         )
         info_label.setWordWrap(True)
         add_layout.addWidget(info_label)
@@ -454,7 +454,7 @@ class PaceUI(QWidget):
         self.sched_warning_label = QLabel("")
         self.sched_warning_label.setStyleSheet(
             "color: #b00; font-weight: bold; background: #fff3cd;"
-            "border: 1px solid #f0ad4e; border-radius: 4px; padding: 4px;"
+            "border: 1px solid #f0ad4e; border-radius: 1px; padding: 4px;"
         )
         self.sched_warning_label.setWordWrap(True)
         self.sched_warning_label.setVisible(False)
