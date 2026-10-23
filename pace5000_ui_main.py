@@ -274,9 +274,9 @@ class PaceUI(QWidget):
         log_group = QGroupBox("Data Logging")
         log_layout = QVBoxLayout()
         log_layout.setSpacing(6)
-        self.btn_log_start = QPushButton("● Start Logging")
+        self.btn_log_start = QPushButton("Start Logging")
         self.btn_log_start.setStyleSheet(
-            "background-color: #4CAF50; color: white; font-weight: bold; padding: 6px 16px;"
+            "background-color: #6BB06C; color: white; font-weight: bold; padding: 6px 16px;"
         )
         self.btn_log_start.setEnabled(False)
         self.btn_log_stop = QPushButton("■ Stop / Save Log")
@@ -432,7 +432,7 @@ class PaceUI(QWidget):
         ctrl_row = QHBoxLayout()
         self.btn_sched_start = QPushButton("▶ Start Schedule")
         self.btn_sched_start.setStyleSheet(
-            "background-color: #4CAF50; color: white; font-weight: bold; padding: 8px 20px;"
+            "background-color: #6BB06C; color: white; font-weight: bold; padding: 8px 20px;"
         )
         self.btn_sched_stop = QPushButton("■ Stop")
         self.btn_sched_stop.setStyleSheet(

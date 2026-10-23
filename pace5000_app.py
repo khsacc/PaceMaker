@@ -306,11 +306,11 @@ class ScheduledControlRunner(QObject):
         now = time.time()
         if self._pressure_eta and now > self._pressure_eta + self._ETA_WARNING_SEC:
             delay_min = (now - self._pressure_eta) / 60.0
-            warning_str = f"  ⚠ ETA exceeded by {delay_min:.1f} min"
+            warning_str = f"  [Caution] ETA exceeded by {delay_min:.1f} min"
             if not self._eta_warning_sent:
                 self._eta_warning_sent = True
                 self.pressure_warning.emit(
-                    f"⚠  Pressure has not reached target {self._target_display_str} — "
+                    f"[Caution]  Pressure has not reached target {self._target_display_str} — "
                         f"{delay_min:.1f} min past the estimated arrival time.\n"
                         f"The sequence continues monitoring. Press Stop to abort."
                 )
@@ -790,7 +790,7 @@ class AppController:
             )
             elapsed = now - self._effort_saturated_since
             self.view.effort_status_label.setText(
-                f"⚠ Effort saturated {elapsed:.0f}s: {effort:.1f}% ({cause})"
+                f"[Caution] Effort saturated {elapsed:.0f}s: {effort:.1f}% ({cause})"
             )
             self.view.effort_status_label.setStyleSheet("color: #b00; font-weight: bold;")
         elif saturated:
