@@ -364,7 +364,7 @@ class AppController:
     # Safety net: if the vacuum valve ends up doing more than half the work
     # (effort this negative or lower), force the device out of Control mode
     # rather than let it keep pulling towards -100%.
-    _EFFORT_AUTO_MEASURE_THRESHOLD_PERCENT = -40.0
+    _EFFORT_AUTO_MEASURE_THRESHOLD_PERCENT = -35.0
 
     def __init__(self, view: PaceUI, backend: Pace5000Backend = None, api_cli: dict | None = None):
         self.view    = view
