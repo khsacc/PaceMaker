@@ -35,12 +35,14 @@ class CachedReadingsTests(unittest.TestCase):
                     self.assertTrue(data["connected"])
                     self.assertAlmostEqual(data["pressure_mpa"], 1.2)
                     self.assertAlmostEqual(data["target_pressure_mpa"], 1.5)
+                    self.assertAlmostEqual(data["slew_mpa_per_sec"], 0.02)
                     self.assertIsInstance(data["timestamp"], float)
                 finally:
                     server.stop()
 
         backend.disconnect_device()
         self.assertIsNone(backend.get_cached_readings()["pressure_mpa"])
+        self.assertIsNone(backend.get_cached_readings()["slew_mpa_per_sec"])
 
 
 if __name__ == "__main__":

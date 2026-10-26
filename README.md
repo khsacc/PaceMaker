@@ -16,7 +16,7 @@ A PyQt6 desktop GUI for controlling and logging a **Druck PACE5000** pressure co
 - CSV data logging
 - **Scheduled control**: build a sequence of pressure steps and waits, save/load as JSON, and run with live plot and automatic logging
 - **HTTP API** (standalone mode only): control and monitor the device from another process on the same machine, or another machine on the LAN — see [API](#api) below
-- **Local readings endpoint**: while connected, `GET http://127.0.0.1:8766/api/v1/readings` returns the last polled pressure and target setpoint without a device query. This read-only endpoint starts automatically in standalone and embedded mode.
+- **Local readings endpoint**: while connected, `GET http://127.0.0.1:8766/api/v1/readings` returns the last polled pressure, target setpoint and slew rate without a device query. This read-only endpoint starts automatically in standalone and embedded mode.
 
 ### Scheduled control window
 ![GUI scheduled control window](./docs/screenshot_schedule.jpg)
@@ -52,7 +52,7 @@ The last-used log save directory is also persisted in `pace5000_settings.json` a
 ### Local readings endpoint
 
 `GET http://127.0.0.1:8766/api/v1/readings` returns JSON such as
-`{"connected": true, "timestamp": 1790000000.0, "pressure_mpa": 1.23, "target_pressure_mpa": 1.5}`.
+`{"connected": true, "timestamp": 1790000000.0, "pressure_mpa": 1.23, "target_pressure_mpa": 1.5, "slew_mpa_per_sec": 0.02}`.
 The timestamp is Unix time in seconds for the last poll. Measured values are
 `null` until the first poll. The listener stops on a normal disconnect. This
 server binds to loopback only, accepts GET only, and does not send commands to the instrument. If port

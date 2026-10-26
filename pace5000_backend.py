@@ -77,6 +77,7 @@ class Pace5000Backend(QObject):
         self._readings_lock = Lock()
         self._cached_pressure_mpa: Optional[float] = None
         self._cached_target_mpa: Optional[float] = None
+        self._cached_slew_mpa_per_sec: Optional[float] = None
         self._cached_at: Optional[float] = None
 
     def get_cached_readings(self) -> dict:
@@ -87,6 +88,7 @@ class Pace5000Backend(QObject):
                 "timestamp": self._cached_at if self.connected else None,
                 "pressure_mpa": self._cached_pressure_mpa if self.connected else None,
                 "target_pressure_mpa": self._cached_target_mpa if self.connected else None,
+                "slew_mpa_per_sec": self._cached_slew_mpa_per_sec if self.connected else None,
             }
 
     @property
@@ -128,6 +130,7 @@ class Pace5000Backend(QObject):
         with self._readings_lock:
             self._cached_pressure_mpa = None
             self._cached_target_mpa = None
+            self._cached_slew_mpa_per_sec = None
             self._cached_at = None
         try:
             if self.sock:
@@ -501,9 +504,10 @@ class Pace5000Backend(QObject):
                 return None
 
         with self._readings_lock:
-            if pressure is not None or target_raw is not None:
+            if pressure is not None or target_raw is not None or slew_raw is not None:
                 self._cached_pressure_mpa = cached_mpa(pressure)
                 self._cached_target_mpa = cached_mpa(target_raw)
+                self._cached_slew_mpa_per_sec = cached_mpa(slew_raw)
                 self._cached_at = time.time()
         if target_raw is not None and slew_raw is not None:
             try:
